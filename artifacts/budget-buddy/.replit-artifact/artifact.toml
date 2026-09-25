@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Budget Buddy"
+description = "A friendly personal budgeting app for setting monthly income, planning category spending, tracking transactions, and staying aware of remaining money."
+version = "1.0.0"
+id = "artifacts/budget-buddy"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18557
+
+[services.development]
+run = "pnpm --filter @workspace/budget-buddy run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/budget-buddy", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/budget-buddy/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18557"
+BASE_PATH = "/"
