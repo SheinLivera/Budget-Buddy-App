@@ -36,6 +36,7 @@ type TransactionType = 'income' | 'expense';
 type BudgetCategory = { id: string; name: string; icon: string; color: string; planned: number };
 type Budget = { month: string; income: number; categories: BudgetCategory[] };
 type Transaction = { id: string; type: TransactionType; description: string; category: string; amount: number; date: string };
+type BudgetData = { budgets: Budget[]; activeMonth: string; transactions: Transaction[]; hasStarted: boolean };
 
 const queryClient = new QueryClient();
 const STORAGE_KEY = 'budget-buddy-data-v1';
@@ -53,6 +54,10 @@ type IconName = keyof typeof iconMap;
 
 const monthKey = new Date().toISOString().slice(0, 7);
 const monthLabel = (key: string) => new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(new Date(`${key}-01T12:00:00`));
+const monthLastDay = (key: string) => {
+  const [year, month] = key.split('-').map(Number);
+  return `${key}-${String(new Date(Date.UTC(year, month, 0)).getUTCDate()).padStart(2, '0')}`;
+};
 const money = (amount: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(amount);
 const moneyPrecise = (amount: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(amount);
 const dateLabel = (date: string) => new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(new Date(`${date}T12:00:00`));
@@ -72,6 +77,14 @@ const seedBudget: Budget = {
 
 const seedTransactions: Transaction[] = [];
 
+const upsertBudget = (budgets: Budget[], budget: Budget) =>
+  [...budgets.filter((item) => item.month !== budget.month), budget].sort((a, b) => a.month.localeCompare(b.month));
+const budgetForMonth = (budgets: Budget[], month: string) =>
+  budgets.find((item) => item.month === month) ??
+  [...budgets].filter((item) => item.month < month).sort((a, b) => b.month.localeCompare(a.month))[0] ??
+  [...budgets].sort((a, b) => a.month.localeCompare(b.month))[0] ??
+  seedBudget;
+
 const previousSampleTransactions: Array<{
   id: string;
   type: TransactionType;
@@ -88,41 +101,60 @@ const previousSampleTransactions: Array<{
   { id: 't-6', type: 'expense', description: 'Dinner with Maya', category: 'Good things', amount: 64.8, day: '09' },
 ];
 
-function loadData() {
+function loadData(): BudgetData {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as { budget: Budget; transactions: Transaction[]; hasStarted?: boolean };
+      const parsed = JSON.parse(stored) as {
+        budget?: Budget;
+        budgets?: Budget[];
+        activeMonth?: string;
+        transactions?: Transaction[];
+        hasStarted?: boolean;
+      };
+      const transactions = Array.isArray(parsed.transactions) ? parsed.transactions : seedTransactions;
+      const legacyBudget = parsed.budget ?? parsed.budgets?.[0] ?? seedBudget;
       const samplePlan = [1240, 520, 220, 180, 260, 600];
       const isUntouchedSample =
+        !parsed.budgets &&
         parsed.budget?.income === 4280 &&
+        Array.isArray(parsed.budget.categories) &&
         parsed.budget.categories.length === samplePlan.length &&
         parsed.budget.categories.every((category, index) =>
           category.id === seedBudget.categories[index]?.id && category.planned === samplePlan[index],
         ) &&
-        parsed.transactions.length === previousSampleTransactions.length &&
-        parsed.transactions.every((transaction, index) =>
+        transactions.length === previousSampleTransactions.length &&
+        transactions.every((transaction, index) =>
           transaction.id === previousSampleTransactions[index]?.id &&
           transaction.type === previousSampleTransactions[index]?.type &&
           transaction.description === previousSampleTransactions[index]?.description &&
           transaction.category === previousSampleTransactions[index]?.category &&
           transaction.amount === previousSampleTransactions[index]?.amount &&
-          transaction.date === `${parsed.budget.month}-${previousSampleTransactions[index]?.day}`,
+          transaction.date === `${legacyBudget.month}-${previousSampleTransactions[index]?.day}`,
         );
-      if (isUntouchedSample) return { budget: seedBudget, transactions: seedTransactions, hasStarted: false };
+      if (isUntouchedSample) {
+        return { budgets: [seedBudget], activeMonth: seedBudget.month, transactions: seedTransactions, hasStarted: false };
+      }
+      const budgets = parsed.budgets?.length ? parsed.budgets : [legacyBudget];
+      const activeBudget =
+        budgets.find((item) => item.month === parsed.activeMonth) ??
+        budgets.find((item) => item.month === legacyBudget.month) ??
+        budgets[0] ??
+        seedBudget;
       return {
-        ...parsed,
+        budgets,
+        activeMonth: activeBudget.month,
+        transactions,
         hasStarted: parsed.hasStarted ?? (
-          parsed.budget.income > 0 ||
-          parsed.budget.categories.some((category) => category.planned > 0) ||
-          parsed.transactions.length > 0
+          budgets.some((item) => item.income > 0 || item.categories.some((category) => category.planned > 0)) ||
+          transactions.length > 0
         ),
       };
     }
   } catch {
     // localStorage can be unavailable in private browsing; the seeded state still works.
   }
-  return { budget: seedBudget, transactions: seedTransactions, hasStarted: false };
+  return { budgets: [seedBudget], activeMonth: seedBudget.month, transactions: seedTransactions, hasStarted: false };
 }
 
 function useBudgetData() {
@@ -134,11 +166,25 @@ function useBudgetData() {
   useEffect(() => {
     if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   }, [data, ready]);
+  const budget = data.budgets.find((item) => item.month === data.activeMonth) ?? data.budgets[0] ?? seedBudget;
   return {
     ...data,
+    budget,
     ready,
-    setBudget: (budget: Budget) => setData((current) => ({ ...current, budget })),
-    startBudget: (budget: Budget) => setData((current) => ({ ...current, budget, hasStarted: true })),
+    setActiveMonth: (month: string) => setData((current) =>
+      current.budgets.some((item) => item.month === month) ? { ...current, activeMonth: month } : current,
+    ),
+    setBudget: (updatedBudget: Budget) => setData((current) => ({
+      ...current,
+      budgets: upsertBudget(current.budgets, updatedBudget),
+      activeMonth: updatedBudget.month,
+    })),
+    startBudget: (updatedBudget: Budget) => setData((current) => ({
+      ...current,
+      budgets: upsertBudget(current.budgets, updatedBudget),
+      activeMonth: updatedBudget.month,
+      hasStarted: true,
+    })),
     addTransaction: (transaction: Transaction) => setData((current) => ({ ...current, transactions: [transaction, ...current.transactions] })),
     removeTransaction: (id: string) => setData((current) => ({ ...current, transactions: current.transactions.filter((item) => item.id !== id) })),
   };
@@ -282,18 +328,23 @@ function PageIntro({ eyebrow, title, children }: { eyebrow: string; title: strin
 }
 
 function Overview({ data }: { data: DataContext }) {
-  const { budget, transactions, addTransaction } = data;
+  const { budget, budgets, setActiveMonth, transactions, addTransaction } = data;
   const [spendDescription, setSpendDescription] = useState('');
   const [spendCategory, setSpendCategory] = useState(budget.categories[0]?.name ?? 'Other');
   const [spendAmount, setSpendAmount] = useState('');
-  const [spendDate, setSpendDate] = useState(new Date().toISOString().slice(0, 10));
+  const [spendDate, setSpendDate] = useState(budget.month === monthKey ? new Date().toISOString().slice(0, 10) : `${budget.month}-01`);
   const [spendFeedback, setSpendFeedback] = useState('');
   const [spendSuggestionsOpen, setSpendSuggestionsOpen] = useState(false);
   const [activeSpendSuggestion, setActiveSpendSuggestion] = useState(-1);
-  const expenses = useMemo(() => transactions.filter((item) => item.type === 'expense'), [transactions]);
+  const allExpenses = useMemo(() => transactions.filter((item) => item.type === 'expense'), [transactions]);
+  const monthTransactions = useMemo(
+    () => transactions.filter((item) => item.date.slice(0, 7) === budget.month).sort((a, b) => b.date.localeCompare(a.date)),
+    [transactions, budget.month],
+  );
+  const expenses = useMemo(() => monthTransactions.filter((item) => item.type === 'expense'), [monthTransactions]);
   const savedSpendDescriptions = useMemo(() => {
     const seen = new Set<string>();
-    return [...budget.categories.map((category) => category.name), ...expenses.map((item) => item.description)]
+    return [...budget.categories.map((category) => category.name), ...allExpenses.map((item) => item.description)]
       .flatMap((value) => {
         const description = value.trim();
         const key = description.toLocaleLowerCase();
@@ -301,7 +352,7 @@ function Overview({ data }: { data: DataContext }) {
         seen.add(key);
         return [description];
       });
-  }, [budget.categories, expenses]);
+  }, [budget.categories, allExpenses]);
   const matchingSpendDescriptions = useMemo(() => {
     const query = spendDescription.trim().toLocaleLowerCase();
     if (!query) return [];
@@ -316,6 +367,10 @@ function Overview({ data }: { data: DataContext }) {
   const remaining = budget.income - spent;
   const percentSpent = budget.income ? Math.min(100, Math.round((spent / budget.income) * 100)) : 0;
   const spentFor = (category: string) => expenses.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0);
+  useEffect(() => {
+    setSpendDate(budget.month === monthKey ? new Date().toISOString().slice(0, 10) : `${budget.month}-01`);
+    setSpendCategory(budget.categories[0]?.name ?? 'Other');
+  }, [budget.month, budget.categories]);
   const addActualSpending = (event: FormEvent) => {
     event.preventDefault();
     const amount = Number(spendAmount);
@@ -339,6 +394,20 @@ function Overview({ data }: { data: DataContext }) {
     <div>
       <PageIntro eyebrow="Your monthly check-in" title="A clear view of your money.">
         <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[.14em] text-[#778a80]" htmlFor="select-budget-history-month">
+            View month
+            <select
+              id="select-budget-history-month"
+              data-testid="select-budget-history-month"
+              value={budget.month}
+              onChange={(event) => setActiveMonth(event.target.value)}
+              className="input-field rounded-xl px-3 py-2.5 text-[13px] font-semibold normal-case tracking-normal text-[#315b4e]"
+            >
+              {[...budgets].sort((a, b) => b.month.localeCompare(a.month)).map((item) => (
+                <option key={item.month} value={item.month}>{monthLabel(item.month)}</option>
+              ))}
+            </select>
+          </label>
           <Link href="/start-budget" className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#cfc8b9] bg-[#fbf8f1] px-4 py-3 text-sm font-semibold text-[#315b4e] transition hover:-translate-y-0.5 hover:border-[#9eb4a5]" data-testid="link-start-budget">
             <CircleDollarSign size={17} /> Start a budget
           </Link>
@@ -363,7 +432,7 @@ function Overview({ data }: { data: DataContext }) {
             <div className="mt-2 flex justify-between text-[11px] text-[#a9c9b9]"><span>{money(spent)} spent</span><span>{money(budget.income)} income</span></div>
           </div>
         </div>
-        <StatCard label="Income" value={money(budget.income)} detail="planned for this month" icon={<ArrowDownLeft size={18} />} color="sage" testId="text-income-total" />
+        <StatCard label="Income" value={money(budget.income)} detail={`planned for ${monthLabel(budget.month)}`} icon={<ArrowDownLeft size={18} />} color="sage" testId="text-income-total" />
         <StatCard label="Planned spending" value={money(planned)} detail={`${money(Math.max(0, budget.income - planned))} left unassigned`} icon={<CircleDollarSign size={18} />} color="peach" testId="text-planned-total" />
       </section>
 
@@ -471,7 +540,7 @@ function Overview({ data }: { data: DataContext }) {
             </div>
           </Field>
           <Field label="Date" htmlFor="overview-spend-date">
-            <input id="overview-spend-date" data-testid="input-overview-spend-date" required type="date" value={spendDate} onChange={(event) => setSpendDate(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" />
+            <input id="overview-spend-date" data-testid="input-overview-spend-date" required min={`${budget.month}-01`} max={monthLastDay(budget.month)} type="date" value={spendDate} onChange={(event) => setSpendDate(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" />
           </Field>
           <button type="submit" className="flex h-[45px] items-center justify-center gap-2 rounded-xl bg-[#dd977e] px-4 text-[13px] font-bold text-[#55382f] transition hover:-translate-y-0.5 hover:bg-[#e2a087]" data-testid="button-add-overview-spending"><Plus size={17} /> Add spending</button>
         </div>
@@ -503,9 +572,9 @@ function Overview({ data }: { data: DataContext }) {
         </div>
         <div className="paper-card animate-rise delay-3 rounded-[22px] p-5 sm:p-7">
           <div className="mb-5 flex items-start justify-between"><div><h2 className="font-serif text-[24px] text-[#25423b]">Recent activity</h2><p className="mt-1 text-[13px] text-[#78877f]">The latest things you told me.</p></div><Link href="/transactions" className="text-[#315b4e]" data-testid="link-view-all-transactions"><ChevronRight size={19} /></Link></div>
-          {transactions.length === 0 ? <EmptyTransactions compact /> : (
+          {monthTransactions.length === 0 ? <EmptyTransactions compact /> : (
             <div className="space-y-1">
-              {transactions.slice(0, 5).map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} compact />)}
+              {monthTransactions.slice(0, 5).map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} compact />)}
             </div>
           )}
         </div>
@@ -516,14 +585,26 @@ function Overview({ data }: { data: DataContext }) {
 }
 
 function StartBudgetPage({ data }: { data: DataContext }) {
-  const { budget, startBudget: saveStartedBudget } = data;
+  const { budgets, hasStarted, startBudget: saveStartedBudget } = data;
   const [, setLocation] = useLocation();
-  const [income, setIncome] = useState('0');
-  const [plans, setPlans] = useState<Record<string, string>>(() => Object.fromEntries(budget.categories.map((item) => [item.id, '0'])));
+  const [targetMonth, setTargetMonth] = useState(monthKey);
+  const [income, setIncome] = useState(() => String(budgetForMonth(budgets, monthKey).income));
+  const [plans, setPlans] = useState<Record<string, string>>(() =>
+    Object.fromEntries(budgetForMonth(budgets, monthKey).categories.map((item) => [item.id, String(item.planned)])),
+  );
   const [saved, setSaved] = useState(false);
 
-  const totalPlanned = budget.categories.reduce((sum, item) => sum + Math.max(0, Number(plans[item.id]) || 0), 0);
+  const monthBudget = budgetForMonth(budgets, targetMonth);
+  const existingMonth = hasStarted && budgets.some((item) => item.month === targetMonth);
+  const totalPlanned = monthBudget.categories.reduce((sum, item) => sum + Math.max(0, Number(plans[item.id]) || 0), 0);
   const remaining = (Number(income) || 0) - totalPlanned;
+  const changeTargetMonth = (month: string) => {
+    const template = budgetForMonth(budgets, month);
+    setTargetMonth(month);
+    setIncome(String(template.income));
+    setPlans(Object.fromEntries(template.categories.map((item) => [item.id, String(item.planned)])));
+    setSaved(false);
+  };
 
   const startBudget = (event: FormEvent) => {
     event.preventDefault();
@@ -531,9 +612,10 @@ function StartBudgetPage({ data }: { data: DataContext }) {
     if (!Number.isFinite(monthlyIncome) || monthlyIncome <= 0) return;
 
     saveStartedBudget({
-      ...budget,
+      ...monthBudget,
+      month: targetMonth,
       income: monthlyIncome,
-      categories: budget.categories.map((item) => ({
+      categories: monthBudget.categories.map((item) => ({
         ...item,
         planned: Math.max(0, Number(plans[item.id]) || 0),
       })),
@@ -544,15 +626,35 @@ function StartBudgetPage({ data }: { data: DataContext }) {
 
   return (
     <div>
-      <PageIntro eyebrow="A fresh place to begin" title="Let’s give your money a plan.">
-        <div className="flex items-center gap-2 text-[12px] text-[#83928a]"><CalendarDays size={15} /> {monthLabel(budget.month)}</div>
+      <PageIntro
+        eyebrow={existingMonth ? 'Monthly budget history' : 'A fresh place to begin'}
+        title={existingMonth ? `Update ${monthLabel(targetMonth)}’s plan.` : 'Let’s give your money a plan.'}
+      >
+        <div className="flex items-center gap-2 text-[12px] text-[#83928a]"><CalendarDays size={15} /> {monthLabel(targetMonth)}</div>
       </PageIntro>
 
       <form onSubmit={startBudget} className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]">
         <section className="paper-card animate-rise rounded-[22px] p-6 sm:p-8">
+          <div className="mb-6">
+            <label className="text-[11px] font-bold uppercase tracking-[.15em] text-[#778a80]" htmlFor="start-budget-month">Budget month</label>
+            <input
+              id="start-budget-month"
+              data-testid="input-start-budget-month"
+              required
+              type="month"
+              value={targetMonth}
+              onChange={(event) => changeTargetMonth(event.target.value)}
+              className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]"
+            />
+            <p className="mt-2 text-[11px] leading-relaxed text-[#929990]">
+              {existingMonth
+                ? 'This month is already saved. Changes will update its plan.'
+                : `A new month starts from ${monthLabel(monthBudget.month)}’s plan. You can change the income and category amounts below.`}
+            </p>
+          </div>
           <div className="mb-7">
             <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-[#e0eee1] text-[#477666]"><Banknote size={20} /></div>
-            <h2 className="font-serif text-[26px] text-[#315247]">Start with your income</h2>
+            <h2 className="font-serif text-[26px] text-[#315247]">{existingMonth ? 'Update this month’s income' : 'Start with this month’s income'}</h2>
             <p className="mt-2 text-[13px] leading-relaxed text-[#809088]">Add the money you expect to bring home this month. You can adjust it whenever life changes.</p>
           </div>
           <label className="text-[11px] font-bold uppercase tracking-[.15em] text-[#778a80]" htmlFor="start-monthly-income">Monthly take-home income</label>
@@ -578,7 +680,7 @@ function StartBudgetPage({ data }: { data: DataContext }) {
             <p className="mt-2 text-[13px] text-[#809088]">Set a comfortable amount for each part of your life. These are easy to change later.</p>
           </div>
           <div className="space-y-3">
-            {budget.categories.map((category) => {
+            {monthBudget.categories.map((category) => {
               const Icon = iconMap[category.icon as IconName] ?? MoreHorizontal;
               return (
                 <div key={category.id} className="flex items-center gap-3 rounded-2xl border border-[#ede6da] p-3 transition hover:border-[#d9d5c6]">
@@ -595,12 +697,14 @@ function StartBudgetPage({ data }: { data: DataContext }) {
           <div className="mt-7 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center">
             <Link href="/" className="rounded-xl px-4 py-3 text-center text-sm font-semibold text-[#718078] transition hover:bg-[#f5f0e7]" data-testid="link-cancel-start-budget">Not right now</Link>
             <button type="submit" disabled={!Number(income) || Number(income) <= 0} className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold transition ${saved ? 'bg-[#7ba58b] text-white' : 'bg-[#315b4e] text-[#f8f4e9] hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50'}`} data-testid="button-start-budget">
-              {saved ? <><Check size={17} /> Budget started</> : <><Check size={17} /> Start my budget</>}
+              {saved
+                ? <><Check size={17} /> Budget saved</>
+                : <><Check size={17} /> {existingMonth ? 'Save this month' : 'Start my budget'}</>}
             </button>
           </div>
         </section>
       </form>
-      <div className="mt-5 flex items-center gap-2 px-1 text-[12px] text-[#89958d]"><Sparkles size={14} className="text-[#d6987f]" /> Your current transactions stay in your history when you start this plan.</div>
+      <div className="mt-5 flex items-center gap-2 px-1 text-[12px] text-[#89958d]"><Sparkles size={14} className="text-[#d6987f]" /> Each month keeps its own income and plan; transactions stay saved under their recorded month.</div>
     </div>
   );
 }
@@ -704,7 +808,7 @@ function TransactionsPage({ data }: { data: DataContext }) {
       </div>
     </form>}
     <section className="paper-card animate-rise delay-1 rounded-[22px] p-5 sm:p-7">
-      <div className="mb-5 flex items-end justify-between"><div><h2 className="font-serif text-[25px] text-[#315247]">Transaction history</h2><p className="mt-1 text-[13px] text-[#809088]">{transactions.length} {transactions.length === 1 ? 'entry' : 'entries'} this month</p></div><div className="hidden items-center gap-1.5 text-[11px] text-[#96a098] sm:flex"><CreditCard size={14} /> Stored on this device</div></div>
+       <div className="mb-5 flex items-end justify-between"><div><h2 className="font-serif text-[25px] text-[#315247]">Transaction history</h2><p className="mt-1 text-[13px] text-[#809088]">{transactions.length} {transactions.length === 1 ? 'entry' : 'entries'} across all months</p></div><div className="hidden items-center gap-1.5 text-[11px] text-[#96a098] sm:flex"><CreditCard size={14} /> Stored on this device</div></div>
       {sorted.length === 0 ? <EmptyTransactions /> : <div>{sorted.map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} onDelete={() => { if (window.confirm(`Remove ${transaction.description} from your history?`)) removeTransaction(transaction.id); }} />)}</div>}
     </section>
   </div>;
