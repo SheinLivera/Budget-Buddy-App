@@ -288,7 +288,27 @@ function Overview({ data }: { data: DataContext }) {
   const [spendAmount, setSpendAmount] = useState('');
   const [spendDate, setSpendDate] = useState(new Date().toISOString().slice(0, 10));
   const [spendFeedback, setSpendFeedback] = useState('');
+  const [spendSuggestionsOpen, setSpendSuggestionsOpen] = useState(false);
+  const [activeSpendSuggestion, setActiveSpendSuggestion] = useState(-1);
   const expenses = useMemo(() => transactions.filter((item) => item.type === 'expense'), [transactions]);
+  const savedSpendDescriptions = useMemo(() => {
+    const seen = new Set<string>();
+    return expenses.flatMap((item) => {
+      const description = item.description.trim();
+      const key = description.toLocaleLowerCase();
+      if (!description || seen.has(key)) return [];
+      seen.add(key);
+      return [description];
+    });
+  }, [expenses]);
+  const matchingSpendDescriptions = useMemo(() => {
+    const query = spendDescription.trim().toLocaleLowerCase();
+    if (!query) return [];
+    return savedSpendDescriptions
+      .filter((description) => description.toLocaleLowerCase().includes(query))
+      .slice(0, 6);
+  }, [savedSpendDescriptions, spendDescription]);
+  const showSpendSuggestions = spendSuggestionsOpen && Boolean(spendDescription.trim());
   const spent = expenses.reduce((sum, item) => sum + item.amount, 0);
   const planned = budget.categories.reduce((sum, item) => sum + item.planned, 0);
   const remaining = budget.income - spent;
@@ -307,6 +327,8 @@ function Overview({ data }: { data: DataContext }) {
       date: spendDate,
     });
     setSpendDescription('');
+    setSpendSuggestionsOpen(false);
+    setActiveSpendSuggestion(-1);
     setSpendAmount('');
     setSpendFeedback('Spending added to your overview');
     window.setTimeout(() => setSpendFeedback(''), 2200);
@@ -353,7 +375,91 @@ function Overview({ data }: { data: DataContext }) {
         </div>
         <div className="grid gap-4 sm:grid-cols-[1.3fr_1fr_.8fr_1fr_auto] sm:items-end">
           <Field label="What was it?" htmlFor="overview-spend-description">
-            <input id="overview-spend-description" data-testid="input-overview-spend-description" required value={spendDescription} onChange={(event) => setSpendDescription(event.target.value)} placeholder="e.g. groceries" className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" />
+            <div className="relative mt-2">
+              <input
+                id="overview-spend-description"
+                data-testid="input-overview-spend-description"
+                required
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={showSpendSuggestions}
+                aria-controls="overview-spend-suggestions"
+                aria-activedescendant={activeSpendSuggestion >= 0 && matchingSpendDescriptions[activeSpendSuggestion]
+                  ? `overview-spend-suggestion-${activeSpendSuggestion}`
+                  : undefined}
+                value={spendDescription}
+                onChange={(event) => {
+                  setSpendDescription(event.target.value);
+                  setSpendSuggestionsOpen(true);
+                  setActiveSpendSuggestion(-1);
+                }}
+                onFocus={() => {
+                  if (spendDescription.trim()) setSpendSuggestionsOpen(true);
+                }}
+                onBlur={() => setSpendSuggestionsOpen(false)}
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowDown' && matchingSpendDescriptions.length > 0) {
+                    event.preventDefault();
+                    setSpendSuggestionsOpen(true);
+                    setActiveSpendSuggestion((current) => Math.min(current + 1, matchingSpendDescriptions.length - 1));
+                  } else if (event.key === 'ArrowUp' && matchingSpendDescriptions.length > 0) {
+                    event.preventDefault();
+                    setActiveSpendSuggestion((current) => Math.max(current - 1, 0));
+                  } else if (
+                    event.key === 'Enter' &&
+                    showSpendSuggestions &&
+                    activeSpendSuggestion >= 0 &&
+                    matchingSpendDescriptions[activeSpendSuggestion]
+                  ) {
+                    event.preventDefault();
+                    setSpendDescription(matchingSpendDescriptions[activeSpendSuggestion]);
+                    setSpendSuggestionsOpen(false);
+                    setActiveSpendSuggestion(-1);
+                  } else if (event.key === 'Escape') {
+                    setSpendSuggestionsOpen(false);
+                    setActiveSpendSuggestion(-1);
+                  }
+                }}
+                placeholder="e.g. groceries"
+                className="input-field w-full rounded-xl px-3.5 py-3 text-[13px]"
+              />
+              {showSpendSuggestions && (
+                <div
+                  id="overview-spend-suggestions"
+                  role="listbox"
+                  aria-label="Past spending descriptions"
+                  className="absolute inset-x-0 top-full z-30 mt-2 max-h-56 overflow-y-auto rounded-xl border border-[#e5ded1] bg-[#fffdf8] p-1.5 shadow-[0_12px_28px_rgba(37,66,59,.16)]"
+                  data-testid="list-overview-spend-suggestions"
+                >
+                  {matchingSpendDescriptions.length > 0 ? matchingSpendDescriptions.map((description, index) => (
+                    <button
+                      key={description.toLocaleLowerCase()}
+                      id={`overview-spend-suggestion-${index}`}
+                      type="button"
+                      role="option"
+                      aria-selected={activeSpendSuggestion === index}
+                      tabIndex={-1}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        setSpendDescription(description);
+                        setSpendSuggestionsOpen(false);
+                        setActiveSpendSuggestion(-1);
+                      }}
+                      className={`block w-full rounded-lg px-3 py-2.5 text-left text-[13px] transition ${
+                        activeSpendSuggestion === index ? 'bg-[#e8efe7] text-[#315b4e]' : 'text-[#365148] hover:bg-[#f3efe7]'
+                      }`}
+                      data-testid={`option-overview-spend-suggestion-${index}`}
+                    >
+                      {description}
+                    </button>
+                  )) : (
+                    <div className="px-3 py-2.5 text-[12px] leading-relaxed text-[#78877f]" role="status">
+                      No past match. Add this spending and it’ll be saved as a suggestion for next time.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </Field>
           <Field label="Category" htmlFor="overview-spend-category">
             <select id="overview-spend-category" data-testid="select-overview-spend-category" value={spendCategory} onChange={(event) => setSpendCategory(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]">
