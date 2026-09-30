@@ -59,30 +59,59 @@ const dateLabel = (date: string) => new Intl.DateTimeFormat('en-US', { month: 's
 
 const seedBudget: Budget = {
   month: monthKey,
-  income: 4280,
+  income: 0,
   categories: [
-    { id: 'home', name: 'Home', icon: 'home', color: '#739a8b', planned: 1240 },
-    { id: 'food', name: 'Food & groceries', icon: 'food', color: '#db927c', planned: 520 },
-    { id: 'transport', name: 'Getting around', icon: 'transport', color: '#7d9cad', planned: 220 },
-    { id: 'wellness', name: 'Wellbeing', icon: 'wellness', color: '#b69dca', planned: 180 },
-    { id: 'fun', name: 'Good things', icon: 'fun', color: '#d3ae63', planned: 260 },
-    { id: 'future', name: 'Future you', icon: 'future', color: '#82aa72', planned: 600 },
+    { id: 'home', name: 'Home', icon: 'home', color: '#739a8b', planned: 0 },
+    { id: 'food', name: 'Food & groceries', icon: 'food', color: '#db927c', planned: 0 },
+    { id: 'transport', name: 'Getting around', icon: 'transport', color: '#7d9cad', planned: 0 },
+    { id: 'wellness', name: 'Wellbeing', icon: 'wellness', color: '#b69dca', planned: 0 },
+    { id: 'fun', name: 'Good things', icon: 'fun', color: '#d3ae63', planned: 0 },
+    { id: 'future', name: 'Future you', icon: 'future', color: '#82aa72', planned: 0 },
   ],
 };
 
-const seedTransactions: Transaction[] = [
-  { id: 't-1', type: 'income', description: 'Salary', category: 'Income', amount: 4280, date: monthKey + '-01' },
-  { id: 't-2', type: 'expense', description: 'Rent', category: 'Home', amount: 980, date: monthKey + '-02' },
-  { id: 't-3', type: 'expense', description: 'Market groceries', category: 'Food & groceries', amount: 86.4, date: monthKey + '-04' },
-  { id: 't-4', type: 'expense', description: 'Train pass', category: 'Getting around', amount: 72, date: monthKey + '-05' },
-  { id: 't-5', type: 'expense', description: 'Pilates studio', category: 'Wellbeing', amount: 42, date: monthKey + '-07' },
-  { id: 't-6', type: 'expense', description: 'Dinner with Maya', category: 'Good things', amount: 64.8, date: monthKey + '-09' },
+const seedTransactions: Transaction[] = [];
+
+const previousSampleTransactions: Array<{
+  id: string;
+  type: TransactionType;
+  description: string;
+  category: string;
+  amount: number;
+  day: string;
+}> = [
+  { id: 't-1', type: 'income', description: 'Salary', category: 'Income', amount: 4280, day: '01' },
+  { id: 't-2', type: 'expense', description: 'Rent', category: 'Home', amount: 980, day: '02' },
+  { id: 't-3', type: 'expense', description: 'Market groceries', category: 'Food & groceries', amount: 86.4, day: '04' },
+  { id: 't-4', type: 'expense', description: 'Train pass', category: 'Getting around', amount: 72, day: '05' },
+  { id: 't-5', type: 'expense', description: 'Pilates studio', category: 'Wellbeing', amount: 42, day: '07' },
+  { id: 't-6', type: 'expense', description: 'Dinner with Maya', category: 'Good things', amount: 64.8, day: '09' },
 ];
 
 function loadData() {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return JSON.parse(stored) as { budget: Budget; transactions: Transaction[] };
+    if (stored) {
+      const parsed = JSON.parse(stored) as { budget: Budget; transactions: Transaction[] };
+      const samplePlan = [1240, 520, 220, 180, 260, 600];
+      const isUntouchedSample =
+        parsed.budget?.income === 4280 &&
+        parsed.budget.categories.length === samplePlan.length &&
+        parsed.budget.categories.every((category, index) =>
+          category.id === seedBudget.categories[index]?.id && category.planned === samplePlan[index],
+        ) &&
+        parsed.transactions.length === previousSampleTransactions.length &&
+        parsed.transactions.every((transaction, index) =>
+          transaction.id === previousSampleTransactions[index]?.id &&
+          transaction.type === previousSampleTransactions[index]?.type &&
+          transaction.description === previousSampleTransactions[index]?.description &&
+          transaction.category === previousSampleTransactions[index]?.category &&
+          transaction.amount === previousSampleTransactions[index]?.amount &&
+          transaction.date === `${parsed.budget.month}-${previousSampleTransactions[index]?.day}`,
+        );
+      if (isUntouchedSample) return { budget: seedBudget, transactions: seedTransactions };
+      return parsed;
+    }
   } catch {
     // localStorage can be unavailable in private browsing; the seeded state still works.
   }
@@ -301,14 +330,9 @@ function Overview({ data }: { data: DataContext }) {
 function StartBudgetPage({ data }: { data: DataContext }) {
   const { budget, setBudget } = data;
   const [, setLocation] = useLocation();
-  const [income, setIncome] = useState(String(budget.income));
-  const [plans, setPlans] = useState<Record<string, string>>(() => Object.fromEntries(budget.categories.map((item) => [item.id, String(item.planned)])));
+  const [income, setIncome] = useState('0');
+  const [plans, setPlans] = useState<Record<string, string>>(() => Object.fromEntries(budget.categories.map((item) => [item.id, '0'])));
   const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    setIncome(String(budget.income));
-    setPlans(Object.fromEntries(budget.categories.map((item) => [item.id, String(item.planned)])));
-  }, [budget]);
 
   const totalPlanned = budget.categories.reduce((sum, item) => sum + Math.max(0, Number(plans[item.id]) || 0), 0);
   const remaining = (Number(income) || 0) - totalPlanned;
