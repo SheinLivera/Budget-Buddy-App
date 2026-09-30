@@ -293,14 +293,15 @@ function Overview({ data }: { data: DataContext }) {
   const expenses = useMemo(() => transactions.filter((item) => item.type === 'expense'), [transactions]);
   const savedSpendDescriptions = useMemo(() => {
     const seen = new Set<string>();
-    return expenses.flatMap((item) => {
-      const description = item.description.trim();
-      const key = description.toLocaleLowerCase();
-      if (!description || seen.has(key)) return [];
-      seen.add(key);
-      return [description];
-    });
-  }, [expenses]);
+    return [...budget.categories.map((category) => category.name), ...expenses.map((item) => item.description)]
+      .flatMap((value) => {
+        const description = value.trim();
+        const key = description.toLocaleLowerCase();
+        if (!description || seen.has(key)) return [];
+        seen.add(key);
+        return [description];
+      });
+  }, [budget.categories, expenses]);
   const matchingSpendDescriptions = useMemo(() => {
     const query = spendDescription.trim().toLocaleLowerCase();
     if (!query) return [];
@@ -308,7 +309,8 @@ function Overview({ data }: { data: DataContext }) {
       .filter((description) => description.toLocaleLowerCase().includes(query))
       .slice(0, 6);
   }, [savedSpendDescriptions, spendDescription]);
-  const showSpendSuggestions = spendSuggestionsOpen && Boolean(spendDescription.trim());
+  const showSpendSuggestions =
+    spendSuggestionsOpen && Boolean(spendDescription.trim()) && matchingSpendDescriptions.length > 0;
   const spent = expenses.reduce((sum, item) => sum + item.amount, 0);
   const planned = budget.categories.reduce((sum, item) => sum + item.planned, 0);
   const remaining = budget.income - spent;
@@ -383,7 +385,7 @@ function Overview({ data }: { data: DataContext }) {
                 role="combobox"
                 aria-autocomplete="list"
                 aria-expanded={showSpendSuggestions}
-                aria-controls="overview-spend-suggestions"
+                aria-controls={showSpendSuggestions ? 'overview-spend-suggestions' : undefined}
                 aria-activedescendant={activeSpendSuggestion >= 0 && matchingSpendDescriptions[activeSpendSuggestion]
                   ? `overview-spend-suggestion-${activeSpendSuggestion}`
                   : undefined}
@@ -431,7 +433,7 @@ function Overview({ data }: { data: DataContext }) {
                   className="absolute inset-x-0 top-full z-30 mt-2 max-h-56 overflow-y-auto rounded-xl border border-[#e5ded1] bg-[#fffdf8] p-1.5 shadow-[0_12px_28px_rgba(37,66,59,.16)]"
                   data-testid="list-overview-spend-suggestions"
                 >
-                  {matchingSpendDescriptions.length > 0 ? matchingSpendDescriptions.map((description, index) => (
+                  {matchingSpendDescriptions.map((description, index) => (
                     <button
                       key={description.toLocaleLowerCase()}
                       id={`overview-spend-suggestion-${index}`}
@@ -452,11 +454,7 @@ function Overview({ data }: { data: DataContext }) {
                     >
                       {description}
                     </button>
-                  )) : (
-                    <div className="px-3 py-2.5 text-[12px] leading-relaxed text-[#78877f]" role="status">
-                      No past match. Add this spending and it’ll be saved as a suggestion for next time.
-                    </div>
-                  )}
+                  ))}
                 </div>
               )}
             </div>
