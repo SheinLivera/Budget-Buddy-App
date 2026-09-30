@@ -26,7 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { Link, Route, Switch, useLocation } from 'wouter';
+import { Link, Redirect, Route, Switch, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -92,7 +92,7 @@ function loadData() {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as { budget: Budget; transactions: Transaction[] };
+      const parsed = JSON.parse(stored) as { budget: Budget; transactions: Transaction[]; hasStarted?: boolean };
       const samplePlan = [1240, 520, 220, 180, 260, 600];
       const isUntouchedSample =
         parsed.budget?.income === 4280 &&
@@ -109,13 +109,20 @@ function loadData() {
           transaction.amount === previousSampleTransactions[index]?.amount &&
           transaction.date === `${parsed.budget.month}-${previousSampleTransactions[index]?.day}`,
         );
-      if (isUntouchedSample) return { budget: seedBudget, transactions: seedTransactions };
-      return parsed;
+      if (isUntouchedSample) return { budget: seedBudget, transactions: seedTransactions, hasStarted: false };
+      return {
+        ...parsed,
+        hasStarted: parsed.hasStarted ?? (
+          parsed.budget.income > 0 ||
+          parsed.budget.categories.some((category) => category.planned > 0) ||
+          parsed.transactions.length > 0
+        ),
+      };
     }
   } catch {
     // localStorage can be unavailable in private browsing; the seeded state still works.
   }
-  return { budget: seedBudget, transactions: seedTransactions };
+  return { budget: seedBudget, transactions: seedTransactions, hasStarted: false };
 }
 
 function useBudgetData() {
@@ -131,6 +138,7 @@ function useBudgetData() {
     ...data,
     ready,
     setBudget: (budget: Budget) => setData((current) => ({ ...current, budget })),
+    startBudget: (budget: Budget) => setData((current) => ({ ...current, budget, hasStarted: true })),
     addTransaction: (transaction: Transaction) => setData((current) => ({ ...current, transactions: [transaction, ...current.transactions] })),
     removeTransaction: (id: string) => setData((current) => ({ ...current, transactions: current.transactions.filter((item) => item.id !== id) })),
   };
@@ -152,12 +160,19 @@ function App() {
 
 type DataContext = ReturnType<typeof useBudgetData>;
 function AppRouter({ data }: { data: DataContext }) {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
+  if (location === '/') {
+    return (
+      <ErrorBoundary resetKey={location}>
+        {data.hasStarted ? <Redirect to="/overview" /> : <WelcomePage onStart={() => setLocation('/start-budget')} />}
+      </ErrorBoundary>
+    );
+  }
   return (
     <ErrorBoundary resetKey={location}>
       <Shell>
         <Switch>
-          <Route path="/"><Overview data={data} /></Route>
+          <Route path="/overview"><Overview data={data} /></Route>
           <Route path="/start-budget"><StartBudgetPage data={data} /></Route>
           <Route path="/budget"><BudgetPage data={data} /></Route>
           <Route path="/transactions"><TransactionsPage data={data} /></Route>
@@ -168,11 +183,28 @@ function AppRouter({ data }: { data: DataContext }) {
   );
 }
 
+function WelcomePage({ onStart }: { onStart: () => void }) {
+  return (
+    <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#f7f3ea] px-6">
+      <div aria-hidden="true" className="pointer-events-none absolute -left-32 -top-36 h-96 w-96 rounded-full border-[56px] border-[#e9e3d6] opacity-70" />
+      <div aria-hidden="true" className="pointer-events-none absolute -bottom-48 -right-28 h-[30rem] w-[30rem] rounded-full border-[64px] border-[#e5ece2] opacity-80" />
+      <button
+        type="button"
+        onClick={onStart}
+        className="animate-pop relative inline-flex min-h-16 items-center justify-center gap-3 rounded-2xl bg-[#315b4e] px-10 py-5 text-lg font-semibold text-[#f8f4e9] shadow-[0_16px_40px_rgba(49,91,78,.2)] transition hover:-translate-y-1 hover:bg-[#284d42] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#dd977e]/50"
+        data-testid="button-start-budgeting"
+      >
+        Start Budgeting <ChevronRight size={20} />
+      </button>
+    </main>
+  );
+}
+
 function Shell({ children }: { children: ReactNode }) {
   const [location] = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const navItems = [
-    { href: '/', label: 'Overview', icon: BarChart3 },
+    { href: '/overview', label: 'Overview', icon: BarChart3 },
     { href: '/start-budget', label: 'Start a budget', icon: CircleDollarSign },
     { href: '/budget', label: 'My budget', icon: PencilLine },
     { href: '/transactions', label: 'Transactions', icon: Receipt },
@@ -180,7 +212,7 @@ function Shell({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell flex">
       <aside className="desktop-sidebar sidebar fixed inset-y-0 left-0 z-20 flex w-[248px] flex-col px-5 py-7">
-        <Link href="/" className="mb-14 flex items-center gap-3 px-2" data-testid="link-brand">
+        <Link href="/overview" className="mb-14 flex items-center gap-3 px-2" data-testid="link-brand">
           <div className="flex h-10 w-10 items-center justify-center rounded-[13px] bg-[#dd977e] text-[#25423b] shadow-[0_6px_18px_rgba(218,142,117,.2)]">
             <Wallet size={21} strokeWidth={2.2} />
           </div>
@@ -214,7 +246,7 @@ function Shell({ children }: { children: ReactNode }) {
 
       <div className="min-w-0 flex-1 md:ml-[248px]">
         <header className="mobile-nav sticky top-0 z-10 items-center justify-between border-b border-[#e5ded1] bg-[#f7f3ea]/95 px-5 py-4 backdrop-blur">
-          <Link href="/" className="flex items-center gap-2.5" data-testid="link-mobile-brand">
+          <Link href="/overview" className="flex items-center gap-2.5" data-testid="link-mobile-brand">
             <div className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[#dd977e] text-[#25423b]"><Wallet size={17} /></div>
             <span className="font-serif text-[19px]">Budget Buddy</span>
           </Link>
@@ -328,7 +360,7 @@ function Overview({ data }: { data: DataContext }) {
 }
 
 function StartBudgetPage({ data }: { data: DataContext }) {
-  const { budget, setBudget } = data;
+  const { budget, startBudget: saveStartedBudget } = data;
   const [, setLocation] = useLocation();
   const [income, setIncome] = useState('0');
   const [plans, setPlans] = useState<Record<string, string>>(() => Object.fromEntries(budget.categories.map((item) => [item.id, '0'])));
@@ -342,7 +374,7 @@ function StartBudgetPage({ data }: { data: DataContext }) {
     const monthlyIncome = Number(income);
     if (!Number.isFinite(monthlyIncome) || monthlyIncome <= 0) return;
 
-    setBudget({
+    saveStartedBudget({
       ...budget,
       income: monthlyIncome,
       categories: budget.categories.map((item) => ({
@@ -351,7 +383,7 @@ function StartBudgetPage({ data }: { data: DataContext }) {
       })),
     });
     setSaved(true);
-    window.setTimeout(() => setLocation('/'), 700);
+    window.setTimeout(() => setLocation('/overview'), 700);
   };
 
   return (
