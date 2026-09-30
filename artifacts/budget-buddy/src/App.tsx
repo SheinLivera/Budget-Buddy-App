@@ -129,6 +129,7 @@ function AppRouter({ data }: { data: DataContext }) {
       <Shell>
         <Switch>
           <Route path="/"><Overview data={data} /></Route>
+          <Route path="/start-budget"><StartBudgetPage data={data} /></Route>
           <Route path="/budget"><BudgetPage data={data} /></Route>
           <Route path="/transactions"><TransactionsPage data={data} /></Route>
           <Route component={NotFound} />
@@ -143,6 +144,7 @@ function Shell({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const navItems = [
     { href: '/', label: 'Overview', icon: BarChart3 },
+    { href: '/start-budget', label: 'Start a budget', icon: CircleDollarSign },
     { href: '/budget', label: 'My budget', icon: PencilLine },
     { href: '/transactions', label: 'Transactions', icon: Receipt },
   ];
@@ -229,9 +231,14 @@ function Overview({ data }: { data: DataContext }) {
   return (
     <div>
       <PageIntro eyebrow="Your monthly check-in" title="A clear view of your money.">
-        <Link href="/transactions" className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#315b4e] px-4 py-3 text-sm font-semibold text-[#f8f4e9] shadow-[0_7px_18px_rgba(49,91,78,.15)] transition hover:-translate-y-0.5" data-testid="link-add-transaction">
-          <Plus size={17} /> Add a transaction
-        </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <Link href="/start-budget" className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#cfc8b9] bg-[#fbf8f1] px-4 py-3 text-sm font-semibold text-[#315b4e] transition hover:-translate-y-0.5 hover:border-[#9eb4a5]" data-testid="link-start-budget">
+            <CircleDollarSign size={17} /> Start a budget
+          </Link>
+          <Link href="/transactions" className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#315b4e] px-4 py-3 text-sm font-semibold text-[#f8f4e9] shadow-[0_7px_18px_rgba(49,91,78,.15)] transition hover:-translate-y-0.5" data-testid="link-add-transaction">
+            <Plus size={17} /> Add a transaction
+          </Link>
+        </div>
       </PageIntro>
 
       <section className="animate-rise delay-1 grid gap-4 lg:grid-cols-[1.35fr_1fr_1fr]">
@@ -287,6 +294,101 @@ function Overview({ data }: { data: DataContext }) {
         </div>
       </section>
       <div className="animate-rise delay-4 mt-5 flex items-center gap-2 px-1 text-[12px] text-[#87958b]"><Sparkles size={14} className="text-[#d6987f]" /> Progress is information, not a judgment.</div>
+    </div>
+  );
+}
+
+function StartBudgetPage({ data }: { data: DataContext }) {
+  const { budget, setBudget } = data;
+  const [, setLocation] = useLocation();
+  const [income, setIncome] = useState(String(budget.income));
+  const [plans, setPlans] = useState<Record<string, string>>(() => Object.fromEntries(budget.categories.map((item) => [item.id, String(item.planned)])));
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setIncome(String(budget.income));
+    setPlans(Object.fromEntries(budget.categories.map((item) => [item.id, String(item.planned)])));
+  }, [budget]);
+
+  const totalPlanned = budget.categories.reduce((sum, item) => sum + Math.max(0, Number(plans[item.id]) || 0), 0);
+  const remaining = (Number(income) || 0) - totalPlanned;
+
+  const startBudget = (event: FormEvent) => {
+    event.preventDefault();
+    const monthlyIncome = Number(income);
+    if (!Number.isFinite(monthlyIncome) || monthlyIncome <= 0) return;
+
+    setBudget({
+      ...budget,
+      income: monthlyIncome,
+      categories: budget.categories.map((item) => ({
+        ...item,
+        planned: Math.max(0, Number(plans[item.id]) || 0),
+      })),
+    });
+    setSaved(true);
+    window.setTimeout(() => setLocation('/'), 700);
+  };
+
+  return (
+    <div>
+      <PageIntro eyebrow="A fresh place to begin" title="Let’s give your money a plan.">
+        <div className="flex items-center gap-2 text-[12px] text-[#83928a]"><CalendarDays size={15} /> {monthLabel(budget.month)}</div>
+      </PageIntro>
+
+      <form onSubmit={startBudget} className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]">
+        <section className="paper-card animate-rise rounded-[22px] p-6 sm:p-8">
+          <div className="mb-7">
+            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl bg-[#e0eee1] text-[#477666]"><Banknote size={20} /></div>
+            <h2 className="font-serif text-[26px] text-[#315247]">Start with your income</h2>
+            <p className="mt-2 text-[13px] leading-relaxed text-[#809088]">Add the money you expect to bring home this month. You can adjust it whenever life changes.</p>
+          </div>
+          <label className="text-[11px] font-bold uppercase tracking-[.15em] text-[#778a80]" htmlFor="start-monthly-income">Monthly take-home income</label>
+          <div className="relative mt-2">
+            <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 font-serif text-[21px] text-[#719080]">$</span>
+            <input id="start-monthly-income" data-testid="input-start-monthly-income" type="number" min="0.01" step="0.01" required value={income} onChange={(event) => setIncome(event.target.value)} className="input-field w-full rounded-xl py-4 pl-9 pr-4 font-mono text-[22px]" />
+          </div>
+          <div className={`mt-6 rounded-2xl p-4 ${remaining < 0 ? 'bg-[#f6e7df]' : 'bg-[#f3eee5]'}`}>
+            <div className="flex justify-between gap-3 text-[12px] text-[#7f8d85]">
+              <span>{remaining < 0 ? 'More planned than income' : 'Still available to assign'}</span>
+              <span className={`font-mono font-semibold ${remaining < 0 ? 'text-[#a75f4e]' : 'text-[#315247]'}`}>{money(Math.abs(remaining))}</span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-[#e4ded3]">
+              <div className={`h-full rounded-full transition-all ${remaining < 0 ? 'bg-[#d78672]' : 'bg-[#7aa58c]'}`} style={{ width: `${Math.min(100, totalPlanned && Number(income) ? (totalPlanned / Number(income)) * 100 : 0)}%` }} />
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-[#929990]">It’s okay if you don’t assign every dollar yet.</p>
+          </div>
+        </section>
+
+        <section className="paper-card animate-rise delay-1 rounded-[22px] p-6 sm:p-8">
+          <div className="mb-6">
+            <h2 className="font-serif text-[26px] text-[#315247]">Choose what matters this month</h2>
+            <p className="mt-2 text-[13px] text-[#809088]">Set a comfortable amount for each part of your life. These are easy to change later.</p>
+          </div>
+          <div className="space-y-3">
+            {budget.categories.map((category) => {
+              const Icon = iconMap[category.icon as IconName] ?? MoreHorizontal;
+              return (
+                <div key={category.id} className="flex items-center gap-3 rounded-2xl border border-[#ede6da] p-3 transition hover:border-[#d9d5c6]">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" style={{ background: `${category.color}25`, color: category.color }}><Icon size={18} /></div>
+                  <label className="min-w-0 flex-1 text-[13px] font-semibold text-[#3b574d]" htmlFor={`start-plan-${category.id}`}>{category.name}</label>
+                  <div className="relative w-[118px] shrink-0">
+                    <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-[13px] text-[#87998f]">$</span>
+                    <input id={`start-plan-${category.id}`} aria-label={`Monthly amount for ${category.name}`} data-testid={`input-start-plan-${category.id}`} type="number" min="0" step="0.01" value={plans[category.id] ?? ''} onChange={(event) => setPlans((current) => ({ ...current, [category.id]: event.target.value }))} className="input-field w-full rounded-lg py-2.5 pl-7 pr-2 text-right font-mono text-[14px]" />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="mt-7 flex flex-col-reverse items-stretch justify-between gap-3 sm:flex-row sm:items-center">
+            <Link href="/" className="rounded-xl px-4 py-3 text-center text-sm font-semibold text-[#718078] transition hover:bg-[#f5f0e7]" data-testid="link-cancel-start-budget">Not right now</Link>
+            <button type="submit" disabled={!Number(income) || Number(income) <= 0} className={`inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold transition ${saved ? 'bg-[#7ba58b] text-white' : 'bg-[#315b4e] text-[#f8f4e9] hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50'}`} data-testid="button-start-budget">
+              {saved ? <><Check size={17} /> Budget started</> : <><Check size={17} /> Start my budget</>}
+            </button>
+          </div>
+        </section>
+      </form>
+      <div className="mt-5 flex items-center gap-2 px-1 text-[12px] text-[#89958d]"><Sparkles size={14} className="text-[#d6987f]" /> Your current transactions stay in your history when you start this plan.</div>
     </div>
   );
 }
