@@ -282,13 +282,35 @@ function PageIntro({ eyebrow, title, children }: { eyebrow: string; title: strin
 }
 
 function Overview({ data }: { data: DataContext }) {
-  const { budget, transactions } = data;
+  const { budget, transactions, addTransaction } = data;
+  const [spendDescription, setSpendDescription] = useState('');
+  const [spendCategory, setSpendCategory] = useState(budget.categories[0]?.name ?? 'Other');
+  const [spendAmount, setSpendAmount] = useState('');
+  const [spendDate, setSpendDate] = useState(new Date().toISOString().slice(0, 10));
+  const [spendFeedback, setSpendFeedback] = useState('');
   const expenses = useMemo(() => transactions.filter((item) => item.type === 'expense'), [transactions]);
   const spent = expenses.reduce((sum, item) => sum + item.amount, 0);
   const planned = budget.categories.reduce((sum, item) => sum + item.planned, 0);
   const remaining = budget.income - spent;
   const percentSpent = budget.income ? Math.min(100, Math.round((spent / budget.income) * 100)) : 0;
   const spentFor = (category: string) => expenses.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0);
+  const addActualSpending = (event: FormEvent) => {
+    event.preventDefault();
+    const amount = Number(spendAmount);
+    if (!spendDescription.trim() || !Number.isFinite(amount) || amount <= 0) return;
+    addTransaction({
+      id: `t-${Date.now()}`,
+      type: 'expense',
+      description: spendDescription.trim(),
+      category: spendCategory,
+      amount,
+      date: spendDate,
+    });
+    setSpendDescription('');
+    setSpendAmount('');
+    setSpendFeedback('Spending added to your overview');
+    window.setTimeout(() => setSpendFeedback(''), 2200);
+  };
   return (
     <div>
       <PageIntro eyebrow="Your monthly check-in" title="A clear view of your money.">
@@ -308,11 +330,11 @@ function Overview({ data }: { data: DataContext }) {
           <div className="absolute -bottom-24 right-20 h-48 w-48 rounded-full border-[18px] border-[#416c5c]/60" />
           <div className="relative">
             <div className="flex items-center justify-between">
-              <div className="text-[11px] font-bold uppercase tracking-[.18em] text-[#b6d1c0]">Remaining this month</div>
+              <div className="text-[11px] font-bold uppercase tracking-[.18em] text-[#b6d1c0]">Money left over</div>
               <div className="flex items-center gap-1.5 rounded-full bg-[#426d5d] px-2.5 py-1 text-[11px] text-[#d8e7da]"><CalendarDays size={13} /> {monthLabel(budget.month)}</div>
             </div>
             <div className="mt-8 font-serif text-[48px] leading-none tracking-[-.04em] sm:text-[60px]" data-testid="text-remaining-balance">{money(remaining)}</div>
-            <div className="mt-3 flex items-center gap-2 text-[13px] text-[#c6dccd]"><TrendingUp size={15} /> {percentSpent}% of income has a job so far</div>
+            <div className="mt-3 flex items-center gap-2 text-[13px] text-[#c6dccd]"><TrendingUp size={15} /> Left after {money(spent)} in actual spending</div>
             <div className="mt-7 h-2 overflow-hidden rounded-full bg-[#477363]"><div className="h-full rounded-full bg-[#e2a080] transition-all duration-700" style={{ width: `${Math.max(4, percentSpent)}%` }} /></div>
             <div className="mt-2 flex justify-between text-[11px] text-[#a9c9b9]"><span>{money(spent)} spent</span><span>{money(budget.income)} income</span></div>
           </div>
@@ -320,6 +342,36 @@ function Overview({ data }: { data: DataContext }) {
         <StatCard label="Income" value={money(budget.income)} detail="planned for this month" icon={<ArrowDownLeft size={18} />} color="sage" testId="text-income-total" />
         <StatCard label="Planned spending" value={money(planned)} detail={`${money(Math.max(0, budget.income - planned))} left unassigned`} icon={<CircleDollarSign size={18} />} color="peach" testId="text-planned-total" />
       </section>
+
+      <form onSubmit={addActualSpending} className="paper-card animate-rise delay-2 mt-5 rounded-[22px] p-5 sm:p-7" data-testid="form-overview-spending">
+        <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-serif text-[24px] text-[#25423b]">Add actual spending</h2>
+            <p className="mt-1 text-[13px] text-[#78877f]">Log a purchase here and your category totals and money left over update right away.</p>
+          </div>
+          {spendFeedback && <div role="status" className="flex items-center gap-1.5 rounded-full bg-[#e1eee2] px-3 py-1.5 text-[12px] font-semibold text-[#4c7b66] animate-pop" data-testid="status-overview-spending"><Check size={14} />{spendFeedback}</div>}
+        </div>
+        <div className="grid gap-4 sm:grid-cols-[1.3fr_1fr_.8fr_1fr_auto] sm:items-end">
+          <Field label="What was it?" htmlFor="overview-spend-description">
+            <input id="overview-spend-description" data-testid="input-overview-spend-description" required value={spendDescription} onChange={(event) => setSpendDescription(event.target.value)} placeholder="e.g. groceries" className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" />
+          </Field>
+          <Field label="Category" htmlFor="overview-spend-category">
+            <select id="overview-spend-category" data-testid="select-overview-spend-category" value={spendCategory} onChange={(event) => setSpendCategory(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]">
+              {budget.categories.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Amount" htmlFor="overview-spend-amount">
+            <div className="relative mt-2">
+              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[#8b9c91]">$</span>
+              <input id="overview-spend-amount" data-testid="input-overview-spend-amount" required min="0.01" step="0.01" type="number" value={spendAmount} onChange={(event) => setSpendAmount(event.target.value)} className="input-field w-full rounded-xl py-3 pl-8 pr-3 text-[13px]" />
+            </div>
+          </Field>
+          <Field label="Date" htmlFor="overview-spend-date">
+            <input id="overview-spend-date" data-testid="input-overview-spend-date" required type="date" value={spendDate} onChange={(event) => setSpendDate(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" />
+          </Field>
+          <button type="submit" className="flex h-[45px] items-center justify-center gap-2 rounded-xl bg-[#dd977e] px-4 text-[13px] font-bold text-[#55382f] transition hover:-translate-y-0.5 hover:bg-[#e2a087]" data-testid="button-add-overview-spending"><Plus size={17} /> Add spending</button>
+        </div>
+      </form>
 
       <section className="mt-8 grid gap-5 lg:grid-cols-[1.35fr_1fr]">
         <div className="paper-card animate-rise delay-2 rounded-[22px] p-5 sm:p-7">
