@@ -35,8 +35,10 @@ import NotFound from '@/pages/not-found';
 type TransactionType = 'income' | 'expense';
 type BudgetCategory = { id: string; name: string; icon: string; color: string; planned: number };
 type Budget = { month: string; income: number; categories: BudgetCategory[] };
-type Transaction = { id: string; type: TransactionType; description: string; category: string; amount: number; date: string };
-type BudgetData = { budgets: Budget[]; activeMonth: string; transactions: Transaction[]; hasStarted: boolean };
+type Transaction = { id: string; type: TransactionType; description: string; category: string; amount: number; date: string; goalId?: string; recurringId?: string };
+type SavingsGoal = { id: string; name: string; target: number };
+type RecurringTemplate = { id: string; description: string; type: TransactionType; amount: number; day: number; category: string };
+type BudgetData = { budgets: Budget[]; activeMonth: string; transactions: Transaction[]; hasStarted: boolean; goals: SavingsGoal[]; recurringTemplates: RecurringTemplate[]; spendingAlerts: boolean };
 
 const queryClient = new QueryClient();
 const STORAGE_KEY = 'budget-buddy-data-v1';
@@ -111,6 +113,9 @@ function loadData(): BudgetData {
         activeMonth?: string;
         transactions?: Transaction[];
         hasStarted?: boolean;
+        goals?: SavingsGoal[];
+        recurringTemplates?: RecurringTemplate[];
+        spendingAlerts?: boolean;
       };
       const transactions = Array.isArray(parsed.transactions) ? parsed.transactions : seedTransactions;
       const legacyBudget = parsed.budget ?? parsed.budgets?.[0] ?? seedBudget;
@@ -133,7 +138,7 @@ function loadData(): BudgetData {
           transaction.date === `${legacyBudget.month}-${previousSampleTransactions[index]?.day}`,
         );
       if (isUntouchedSample) {
-        return { budgets: [seedBudget], activeMonth: seedBudget.month, transactions: seedTransactions, hasStarted: false };
+        return { budgets: [seedBudget], activeMonth: seedBudget.month, transactions: seedTransactions, hasStarted: false, goals: [], recurringTemplates: [], spendingAlerts: false };
       }
       const budgets = parsed.budgets?.length ? parsed.budgets : [legacyBudget];
       const activeBudget =
@@ -145,6 +150,9 @@ function loadData(): BudgetData {
         budgets,
         activeMonth: activeBudget.month,
         transactions,
+        goals: Array.isArray(parsed.goals) ? parsed.goals : [],
+        recurringTemplates: Array.isArray(parsed.recurringTemplates) ? parsed.recurringTemplates : [],
+        spendingAlerts: parsed.spendingAlerts === true,
         hasStarted: parsed.hasStarted ?? (
           budgets.some((item) => item.income > 0 || item.categories.some((category) => category.planned > 0)) ||
           transactions.length > 0
@@ -154,7 +162,7 @@ function loadData(): BudgetData {
   } catch {
     // localStorage can be unavailable in private browsing; the seeded state still works.
   }
-  return { budgets: [seedBudget], activeMonth: seedBudget.month, transactions: seedTransactions, hasStarted: false };
+  return { budgets: [seedBudget], activeMonth: seedBudget.month, transactions: seedTransactions, hasStarted: false, goals: [], recurringTemplates: [], spendingAlerts: false };
 }
 
 function useBudgetData() {
@@ -187,6 +195,10 @@ function useBudgetData() {
     })),
     addTransaction: (transaction: Transaction) => setData((current) => ({ ...current, transactions: [transaction, ...current.transactions] })),
     removeTransaction: (id: string) => setData((current) => ({ ...current, transactions: current.transactions.filter((item) => item.id !== id) })),
+    addGoal: (goal: SavingsGoal) => setData((current) => ({ ...current, goals: [...current.goals, goal] })),
+    addRecurringTemplate: (template: RecurringTemplate) => setData((current) => ({ ...current, recurringTemplates: [...current.recurringTemplates, template] })),
+    removeRecurringTemplate: (id: string) => setData((current) => ({ ...current, recurringTemplates: current.recurringTemplates.filter((item) => item.id !== id) })),
+    setSpendingAlerts: (enabled: boolean) => setData((current) => ({ ...current, spendingAlerts: enabled })),
   };
 }
 
@@ -328,7 +340,7 @@ function PageIntro({ eyebrow, title, children }: { eyebrow: string; title: strin
 }
 
 function Overview({ data }: { data: DataContext }) {
-  const { budget, budgets, setActiveMonth, transactions, addTransaction } = data;
+  const { budget, budgets, setActiveMonth, transactions, addTransaction, goals, addGoal, spendingAlerts, setSpendingAlerts } = data;
   const [spendDescription, setSpendDescription] = useState('');
   const [spendCategory, setSpendCategory] = useState(budget.categories[0]?.name ?? 'Other');
   const [spendAmount, setSpendAmount] = useState('');
@@ -336,6 +348,14 @@ function Overview({ data }: { data: DataContext }) {
   const [spendFeedback, setSpendFeedback] = useState('');
   const [spendSuggestionsOpen, setSpendSuggestionsOpen] = useState(false);
   const [activeSpendSuggestion, setActiveSpendSuggestion] = useState(-1);
+  const [incomeDescription, setIncomeDescription] = useState('');
+  const [incomeAmount, setIncomeAmount] = useState('');
+  const [incomeDate, setIncomeDate] = useState(budget.month === monthKey ? new Date().toISOString().slice(0, 10) : `${budget.month}-01`);
+  const [incomeFeedback, setIncomeFeedback] = useState('');
+  const [goalName, setGoalName] = useState('');
+  const [goalTarget, setGoalTarget] = useState('');
+  const [goalFeedback, setGoalFeedback] = useState('');
+  const [contributionAmounts, setContributionAmounts] = useState<Record<string, string>>({});
   const allExpenses = useMemo(() => transactions.filter((item) => item.type === 'expense'), [transactions]);
   const monthTransactions = useMemo(
     () => transactions.filter((item) => item.date.slice(0, 7) === budget.month).sort((a, b) => b.date.localeCompare(a.date)),
@@ -367,8 +387,45 @@ function Overview({ data }: { data: DataContext }) {
   const remaining = budget.income - spent;
   const percentSpent = budget.income ? Math.min(100, Math.round((spent / budget.income) * 100)) : 0;
   const spentFor = (category: string) => expenses.filter((item) => item.category === category).reduce((sum, item) => sum + item.amount, 0);
+  const earlierBudget = [...budgets].filter((item) => item.month < budget.month).sort((a, b) => b.month.localeCompare(a.month))[0];
+  const earlierExpenses = earlierBudget
+    ? transactions.filter((item) => item.type === 'expense' && item.date.slice(0, 7) === earlierBudget.month).reduce((sum, item) => sum + item.amount, 0)
+    : 0;
+  const addIncome = (event: FormEvent) => {
+    event.preventDefault();
+    const amount = Number(incomeAmount);
+    if (!incomeDescription.trim() || !Number.isFinite(amount) || amount <= 0 || incomeDate.slice(0, 7) !== budget.month) return;
+    addTransaction({ id: `t-${Date.now()}`, type: 'income', description: incomeDescription.trim(), category: 'Income', amount, date: incomeDate });
+    setIncomeDescription('');
+    setIncomeAmount('');
+    setIncomeFeedback('Income added to actual activity');
+    window.setTimeout(() => setIncomeFeedback(''), 2400);
+  };
+  const createGoal = (event: FormEvent) => {
+    event.preventDefault();
+    const target = Number(goalTarget);
+    if (!goalName.trim() || !Number.isFinite(target) || target <= 0) return;
+    addGoal({ id: `g-${Date.now()}`, name: goalName.trim(), target });
+    setGoalName('');
+    setGoalTarget('');
+    setGoalFeedback('Savings goal created');
+    window.setTimeout(() => setGoalFeedback(''), 2200);
+  };
+  const contributeToGoal = (goal: SavingsGoal) => {
+    const amount = Number(contributionAmounts[goal.id]);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    const goalCategory = budget.categories.find((item) => item.name === 'Future you')?.name ?? budget.categories[0]?.name ?? 'Other';
+    addTransaction({
+      id: `t-${Date.now()}`, type: 'expense', description: `Contribution · ${goal.name}`,
+      category: goalCategory, amount, date: budget.month === monthKey
+        ? new Date().toISOString().slice(0, 10)
+        : `${budget.month}-01`, goalId: goal.id,
+    });
+    setContributionAmounts((current) => ({ ...current, [goal.id]: '' }));
+  };
   useEffect(() => {
     setSpendDate(budget.month === monthKey ? new Date().toISOString().slice(0, 10) : `${budget.month}-01`);
+    setIncomeDate(budget.month === monthKey ? new Date().toISOString().slice(0, 10) : `${budget.month}-01`);
     setSpendCategory(budget.categories[0]?.name ?? 'Other');
   }, [budget.month, budget.categories]);
   const addActualSpending = (event: FormEvent) => {
@@ -434,6 +491,43 @@ function Overview({ data }: { data: DataContext }) {
         </div>
         <StatCard label="Income" value={money(budget.income)} detail={`planned for ${monthLabel(budget.month)}`} icon={<ArrowDownLeft size={18} />} color="sage" testId="text-income-total" />
         <StatCard label="Planned spending" value={money(planned)} detail={`${money(Math.max(0, budget.income - planned))} left unassigned`} icon={<CircleDollarSign size={18} />} color="peach" testId="text-planned-total" />
+      </section>
+
+      <section className="paper-card animate-rise delay-2 mt-5 rounded-[22px] p-5 sm:p-7" aria-labelledby="month-comparison-title" data-testid="section-month-comparison">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+          <div><div className="text-[10px] font-bold uppercase tracking-[.18em] text-[#a66e59]">A little perspective</div><h2 id="month-comparison-title" className="mt-1 font-serif text-[24px] text-[#25423b]">Compared with last saved month</h2></div>
+          {earlierBudget && <span className="text-[12px] text-[#83928a]" data-testid="text-comparison-period">{monthLabel(earlierBudget.month)} → {monthLabel(budget.month)}</span>}
+        </div>
+        {!earlierBudget ? <div className="rounded-2xl bg-[#f3eee5] px-4 py-5 text-[13px] leading-relaxed text-[#75877d]" data-testid="empty-month-comparison">Save a budget for an earlier month to unlock a month-to-month comparison. Each month keeps its own plan and activity.</div> : (
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[
+              { label: 'Planned income', current: budget.income, previous: earlierBudget.income, id: 'planned-income' },
+              { label: 'Actual expenses', current: spent, previous: earlierExpenses, id: 'actual-expenses' },
+              { label: 'Projected money left', current: budget.income - spent, previous: earlierBudget.income - earlierExpenses, id: 'projected-left' },
+            ].map((metric) => {
+              const difference = metric.current - metric.previous;
+              return <div key={metric.id} className="rounded-2xl bg-[#f3eee5] p-4" data-testid={`comparison-metric-${metric.id}`}>
+                <div className="text-[11px] font-bold uppercase tracking-[.12em] text-[#829087]">{metric.label}</div>
+                <div className="mt-2 font-serif text-[26px] text-[#315247]">{money(metric.current)}</div>
+                <div className="mt-1 text-[11px] text-[#839087]">Previously {money(metric.previous)} <span className={`ml-1 font-semibold ${difference > 0 ? 'text-[#a66e59]' : 'text-[#4d8069]'}`}>{difference > 0 ? '+' : difference < 0 ? '−' : '·'}{money(Math.abs(difference))}</span></div>
+              </div>;
+            })}
+          </div>
+        )}
+        <p className="mt-3 text-[11px] text-[#929990]">Income is the planned amount; expenses are actual transactions for each month.</p>
+      </section>
+
+      <section className="paper-card animate-rise delay-2 mt-5 rounded-[22px] p-5 sm:p-7" data-testid="section-quick-income">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div><h2 className="font-serif text-[24px] text-[#25423b]">Add income</h2><p className="mt-1 text-[13px] text-[#78877f]">Record money received this month. This updates actual activity, not your planned income.</p></div>
+          {incomeFeedback && <span role="status" className="rounded-full bg-[#e1eee2] px-3 py-1.5 text-[12px] font-semibold text-[#4c7b66]" data-testid="status-quick-income">{incomeFeedback}</span>}
+        </div>
+        <form onSubmit={addIncome} className="grid gap-4 sm:grid-cols-[1.3fr_.8fr_1fr_auto] sm:items-end">
+          <Field label="Where did it come from?" htmlFor="quick-income-description"><input id="quick-income-description" data-testid="input-quick-income-description" required value={incomeDescription} onChange={(event) => setIncomeDescription(event.target.value)} placeholder="e.g. freelance work" className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+          <Field label="Amount" htmlFor="quick-income-amount"><input id="quick-income-amount" data-testid="input-quick-income-amount" required type="number" min="0.01" step="0.01" value={incomeAmount} onChange={(event) => setIncomeAmount(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+          <Field label="Date" htmlFor="quick-income-date"><input id="quick-income-date" data-testid="input-quick-income-date" required type="date" min={`${budget.month}-01`} max={monthLastDay(budget.month)} value={incomeDate} onChange={(event) => setIncomeDate(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+          <button type="submit" className="flex h-[45px] items-center justify-center gap-2 rounded-xl bg-[#dd977e] px-4 text-[13px] font-bold text-[#55382f] transition hover:-translate-y-0.5" data-testid="button-add-quick-income"><Plus size={16} /> Add income</button>
+        </form>
       </section>
 
       <form onSubmit={addActualSpending} className="paper-card animate-rise delay-2 mt-5 rounded-[22px] p-5 sm:p-7" data-testid="form-overview-spending">
@@ -557,6 +651,9 @@ function Overview({ data }: { data: DataContext }) {
               const Icon = iconMap[category.icon as IconName] ?? MoreHorizontal;
               const categorySpent = spentFor(category.name);
               const percent = category.planned ? Math.min(100, Math.round((categorySpent / category.planned) * 100)) : 0;
+              const alertLevel = spendingAlerts && category.planned > 0 && categorySpent >= category.planned
+                ? 'over'
+                : spendingAlerts && category.planned > 0 && categorySpent >= category.planned * .8 ? 'near' : '';
               return (
                 <div key={category.id} data-testid={`category-progress-${category.id}`}>
                   <div className="mb-2 flex items-center gap-3 text-[13px]">
@@ -564,6 +661,7 @@ function Overview({ data }: { data: DataContext }) {
                     <span className="font-semibold text-[#365148]">{category.name}</span>
                     <span className="ml-auto font-mono text-[11px] text-[#819088]">{money(categorySpent)} <span className="font-sans">of</span> {money(category.planned)}</span>
                   </div>
+                  {alertLevel && <div role="status" className={`mb-2 text-[11px] font-semibold ${alertLevel === 'over' ? 'text-[#a75f4e]' : 'text-[#a66e42]'}`} data-testid={`status-spending-alert-${category.id}`}>{alertLevel === 'over' ? `Over plan by ${money(categorySpent - category.planned)}` : 'Getting close to this category’s plan'}</div>}
                   <div className="progress-track h-2 overflow-hidden rounded-full"><div className="progress-fill h-full rounded-full" style={{ width: `${Math.max(categorySpent ? 3 : 0, percent)}%`, backgroundColor: category.color }} /></div>
                 </div>
               );
@@ -578,6 +676,41 @@ function Overview({ data }: { data: DataContext }) {
             </div>
           )}
         </div>
+      </section>
+      <section className="paper-card mt-5 rounded-[22px] p-5 sm:p-7" data-testid="section-spending-alerts">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+          <div><h2 className="font-serif text-[22px] text-[#25423b]">Gentle spending alerts</h2><p className="mt-1 max-w-xl text-[13px] leading-relaxed text-[#78877f]">When enabled, categories with a positive plan are flagged at 80% and marked over plan above 100%. Zero-planned categories stay quiet.</p></div>
+          <label className="inline-flex min-h-11 cursor-pointer items-center gap-3 rounded-xl bg-[#f3eee5] px-4 py-2 text-[13px] font-semibold text-[#365148]">
+            <input type="checkbox" checked={spendingAlerts} onChange={(event) => setSpendingAlerts(event.target.checked)} aria-label="Enable spending alerts" data-testid="toggle-spending-alerts" className="h-4 w-4 accent-[#477666]" />
+            {spendingAlerts ? 'Alerts on' : 'Alerts off'}
+          </label>
+        </div>
+      </section>
+
+      <section className="paper-card mt-5 rounded-[22px] p-5 sm:p-7" data-testid="section-savings-goals">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+          <div><div className="text-[10px] font-bold uppercase tracking-[.18em] text-[#a66e59]">For future you</div><h2 className="mt-1 font-serif text-[24px] text-[#25423b]">Savings goals</h2><p className="mt-1 text-[13px] text-[#78877f]">Progress follows your contributions across every saved month.</p></div>
+          {goalFeedback && <span role="status" className="rounded-full bg-[#e1eee2] px-3 py-1.5 text-[12px] font-semibold text-[#4c7b66]" data-testid="status-goal-feedback">{goalFeedback}</span>}
+        </div>
+        <form onSubmit={createGoal} className="grid gap-3 rounded-2xl bg-[#f3eee5] p-4 sm:grid-cols-[1.2fr_.8fr_auto] sm:items-end">
+          <Field label="Goal name" htmlFor="savings-goal-name"><input id="savings-goal-name" data-testid="input-savings-goal-name" required maxLength={60} value={goalName} onChange={(event) => setGoalName(event.target.value)} placeholder="e.g. A weekend away" className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+          <Field label="Target amount" htmlFor="savings-goal-target"><input id="savings-goal-target" data-testid="input-savings-goal-target" required min="0.01" step="0.01" type="number" value={goalTarget} onChange={(event) => setGoalTarget(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+          <button type="submit" className="flex h-[45px] items-center justify-center gap-2 rounded-xl bg-[#315b4e] px-4 text-[13px] font-bold text-[#f8f4e9] transition hover:-translate-y-0.5" data-testid="button-create-savings-goal"><Plus size={16} /> Create goal</button>
+        </form>
+        {goals.length === 0 ? <div className="mt-4 rounded-2xl border border-dashed border-[#dcd5c8] px-4 py-7 text-center" data-testid="empty-savings-goals"><p className="font-serif text-[18px] text-[#365148]">Nothing set aside just yet</p><p className="mt-1 text-[12px] text-[#8c9992]">Create a goal above, then add contributions as you go.</p></div> : <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          {goals.map((goal) => {
+            const progress = transactions.filter((item) => item.goalId === goal.id && item.type === 'expense').reduce((sum, item) => sum + item.amount, 0);
+            return <div key={goal.id} className="rounded-2xl border border-[#ede6da] p-4" data-testid={`card-savings-goal-${goal.id}`}>
+              <div className="flex items-start justify-between gap-3"><div><h3 className="font-serif text-[19px] text-[#315247]">{goal.name}</h3><p className="mt-1 text-[12px] text-[#85938b]" data-testid={`text-goal-progress-${goal.id}`}>{moneyPrecise(progress)} saved of {moneyPrecise(goal.target)}</p></div><span className="rounded-full bg-[#e5efe5] px-2.5 py-1 text-[11px] font-semibold text-[#56806e]">{Math.min(100, Math.round(progress / goal.target * 100))}%</span></div>
+              <div className="progress-track mt-3 h-2 overflow-hidden rounded-full"><div className="progress-fill h-full rounded-full bg-[#82aa72]" style={{ width: `${Math.min(100, progress / goal.target * 100)}%` }} /></div>
+              <div className="mt-4 grid gap-2 sm:grid-cols-[1fr_auto]">
+                <label className="sr-only" htmlFor={`goal-contribution-${goal.id}`}>Contribution amount for {goal.name}</label>
+                <input id={`goal-contribution-${goal.id}`} data-testid={`input-goal-contribution-${goal.id}`} type="number" min="0.01" step="0.01" value={contributionAmounts[goal.id] ?? ''} onChange={(event) => setContributionAmounts((current) => ({ ...current, [goal.id]: event.target.value }))} placeholder="Contribution amount" className="input-field min-w-0 rounded-xl px-3.5 py-2.5 text-[13px]" />
+                <button type="button" onClick={() => contributeToGoal(goal)} disabled={!Number(contributionAmounts[goal.id]) || Number(contributionAmounts[goal.id]) <= 0} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#e4eee1] px-3.5 py-2.5 text-[12px] font-bold text-[#477666] transition hover:bg-[#d8e8d7] disabled:cursor-not-allowed disabled:opacity-50" data-testid={`button-contribute-goal-${goal.id}`}><Plus size={15} /> Add contribution</button>
+              </div>
+            </div>;
+          })}
+        </div>}
       </section>
       <div className="animate-rise delay-4 mt-5 flex items-center gap-2 px-1 text-[12px] text-[#87958b]"><Sparkles size={14} className="text-[#d6987f]" /> Progress is information, not a judgment.</div>
     </div>
@@ -773,7 +906,7 @@ function BudgetPage({ data }: { data: DataContext }) {
 }
 
 function TransactionsPage({ data }: { data: DataContext }) {
-  const { transactions, budget, addTransaction, removeTransaction } = data;
+  const { transactions, budget, budgets, setActiveMonth, addTransaction, removeTransaction, recurringTemplates, addRecurringTemplate, removeRecurringTemplate } = data;
   const [type, setType] = useState<TransactionType>('expense');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState(budget.categories[0]?.name ?? 'Other');
@@ -781,6 +914,12 @@ function TransactionsPage({ data }: { data: DataContext }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [feedback, setFeedback] = useState('');
   const [showForm, setShowForm] = useState(true);
+  const [templateDescription, setTemplateDescription] = useState('');
+  const [templateType, setTemplateType] = useState<TransactionType>('expense');
+  const [templateAmount, setTemplateAmount] = useState('');
+  const [templateDay, setTemplateDay] = useState('1');
+  const [templateCategory, setTemplateCategory] = useState(budget.categories[0]?.name ?? 'Other');
+  const [templateFeedback, setTemplateFeedback] = useState('');
   const sorted = useMemo(() => [...transactions].sort((a, b) => b.date.localeCompare(a.date)), [transactions]);
   const add = (event: FormEvent) => {
     event.preventDefault();
@@ -789,10 +928,70 @@ function TransactionsPage({ data }: { data: DataContext }) {
     setDescription(''); setAmount(''); setFeedback(type === 'income' ? 'Income added' : 'Expense added');
     window.setTimeout(() => setFeedback(''), 2200);
   };
+  const saveTemplate = (event: FormEvent) => {
+    event.preventDefault();
+    const value = Number(templateAmount);
+    const day = Number(templateDay);
+    if (!templateDescription.trim() || !Number.isFinite(value) || value <= 0 || !Number.isInteger(day) || day < 1 || day > 31) return;
+    addRecurringTemplate({
+      id: `r-${Date.now()}`, description: templateDescription.trim(), type: templateType,
+      amount: value, day, category: templateType === 'income' ? 'Income' : templateCategory,
+    });
+    setTemplateDescription('');
+    setTemplateAmount('');
+    setTemplateDay('1');
+    setTemplateFeedback('Monthly template saved');
+    window.setTimeout(() => setTemplateFeedback(''), 2200);
+  };
+  const applyTemplate = (template: RecurringTemplate) => {
+    const duplicate = transactions.some((item) => item.recurringId === template.id && item.date.slice(0, 7) === budget.month);
+    if (duplicate) return;
+    const lastDay = Number(monthLastDay(budget.month).slice(-2));
+    const date = `${budget.month}-${String(Math.min(template.day, lastDay)).padStart(2, '0')}`;
+    const category = template.type === 'income'
+      ? 'Income'
+      : (budget.categories.some((item) => item.name === template.category) ? template.category : budget.categories[0]?.name ?? 'Other');
+    addTransaction({
+      id: `t-${Date.now()}`, type: template.type, description: template.description,
+      category, amount: template.amount, date, recurringId: template.id,
+    });
+    setTemplateFeedback(`${template.description} added for ${monthLabel(budget.month)}`);
+    window.setTimeout(() => setTemplateFeedback(''), 2400);
+  };
   return <div>
     <PageIntro eyebrow="Your money story" title="Keep the picture current.">
       <button onClick={() => setShowForm((current) => !current)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#315b4e] px-4 py-3 text-sm font-semibold text-[#f8f4e9] shadow-[0_7px_18px_rgba(49,91,78,.15)] transition hover:-translate-y-0.5" data-testid="button-toggle-transaction-form">{showForm ? <X size={17} /> : <Plus size={17} />}{showForm ? 'Close form' : 'Add transaction'}</button>
     </PageIntro>
+    <section className="paper-card mb-7 rounded-[22px] p-5 sm:p-7" data-testid="section-recurring-templates">
+      <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+        <div><div className="text-[10px] font-bold uppercase tracking-[.18em] text-[#a66e59]">Your monthly rhythm</div><h2 className="mt-1 font-serif text-[24px] text-[#25423b]">Recurring templates</h2><p className="mt-1 max-w-2xl text-[13px] text-[#78877f]">Templates never post automatically. Apply one to the selected month whenever you’re ready.</p></div>
+        <label className="text-[11px] font-bold uppercase tracking-[.13em] text-[#778a80]" htmlFor="recurring-selected-month">Apply to month
+          <select id="recurring-selected-month" data-testid="select-recurring-month" value={budget.month} onChange={(event) => setActiveMonth(event.target.value)} className="input-field mt-1 block rounded-xl px-3 py-2.5 text-[13px] font-semibold normal-case tracking-normal text-[#315b4e]">
+            {[...budgets].sort((a, b) => b.month.localeCompare(a.month)).map((item) => <option key={item.month} value={item.month}>{monthLabel(item.month)}</option>)}
+          </select>
+        </label>
+      </div>
+      <form onSubmit={saveTemplate} className="grid gap-3 rounded-2xl bg-[#f3eee5] p-4 sm:grid-cols-2 lg:grid-cols-[1.25fr_.8fr_.8fr_.7fr_1fr_auto] lg:items-end">
+        <Field label="Description" htmlFor="template-description"><input id="template-description" data-testid="input-template-description" required maxLength={80} value={templateDescription} onChange={(event) => setTemplateDescription(event.target.value)} placeholder="e.g. Paycheck" className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+        <Field label="Type" htmlFor="template-type"><select id="template-type" data-testid="select-template-type" value={templateType} onChange={(event) => setTemplateType(event.target.value as TransactionType)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]"><option value="expense">Expense</option><option value="income">Income</option></select></Field>
+        <Field label="Amount" htmlFor="template-amount"><input id="template-amount" data-testid="input-template-amount" required type="number" min="0.01" step="0.01" value={templateAmount} onChange={(event) => setTemplateAmount(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+        <Field label="Day" htmlFor="template-day"><input id="template-day" data-testid="input-template-day" required type="number" min="1" max="31" value={templateDay} onChange={(event) => setTemplateDay(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]" /></Field>
+        {templateType === 'expense' ? <Field label="Category" htmlFor="template-category"><select id="template-category" data-testid="select-template-category" value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)} className="input-field mt-2 w-full rounded-xl px-3.5 py-3 text-[13px]">{budget.categories.map((item) => <option key={item.id}>{item.name}</option>)}</select></Field> : <div className="hidden lg:block" />}
+        <button type="submit" className="flex h-[45px] items-center justify-center gap-2 rounded-xl bg-[#315b4e] px-4 text-[13px] font-bold text-[#f8f4e9] transition hover:-translate-y-0.5" data-testid="button-save-recurring-template"><Plus size={16} /> Save template</button>
+      </form>
+      {templateFeedback && <div role="status" className="mt-3 text-[12px] font-semibold text-[#4c7b66]" data-testid="status-recurring-feedback">{templateFeedback}</div>}
+      {recurringTemplates.length === 0 ? <div className="mt-4 rounded-2xl border border-dashed border-[#dcd5c8] px-4 py-6 text-center text-[13px] text-[#8c9992]" data-testid="empty-recurring-templates">No templates yet. Save a regular income or expense to make month setup quicker.</div> : <div className="mt-4 divide-y divide-[#eee7dc]">
+        {recurringTemplates.map((template) => {
+          const applied = transactions.some((item) => item.recurringId === template.id && item.date.slice(0, 7) === budget.month);
+          return <div key={template.id} className="flex flex-wrap items-center gap-3 py-3" data-testid={`row-recurring-template-${template.id}`}>
+            <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${template.type === 'income' ? 'bg-[#dcebe0] text-[#427661]' : 'bg-[#f2e7dd] text-[#a66e59]'}`}>{template.type === 'income' ? <ArrowDownLeft size={16} /> : <ArrowUpRight size={16} />}</div>
+            <div className="min-w-0 flex-1"><div className="truncate text-[13px] font-semibold text-[#355148]">{template.description}</div><div className="mt-0.5 text-[11px] text-[#91a098]">{template.type === 'income' ? 'Income' : template.category} · day {template.day} · {moneyPrecise(template.amount)}</div></div>
+            <button type="button" disabled={applied} onClick={() => applyTemplate(template)} className="rounded-xl bg-[#e4eee1] px-3 py-2 text-[12px] font-bold text-[#477666] transition hover:bg-[#d8e8d7] disabled:cursor-not-allowed disabled:bg-[#f0eee8] disabled:text-[#929990]" data-testid={`button-apply-template-${template.id}`}>{applied ? 'Added this month' : `Add to ${monthLabel(budget.month)}`}</button>
+            <button type="button" onClick={() => { if (window.confirm(`Delete the ${template.description} template? Existing transactions will stay in your history.`)) removeRecurringTemplate(template.id); }} className="rounded-lg p-2 text-[#a6aaa1] transition hover:bg-[#f2ddd5] hover:text-[#b2614f]" aria-label={`Delete ${template.description} template`} data-testid={`button-delete-template-${template.id}`}><Trash2 size={15} /></button>
+          </div>;
+        })}
+      </div>}
+    </section>
     {showForm && <form onSubmit={add} className="paper-card animate-pop mb-7 rounded-[22px] p-5 sm:p-7">
       <div className="mb-5 flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><h2 className="font-serif text-[24px] text-[#315247]">Add something new</h2><p className="mt-1 text-[13px] text-[#809088]">No need to remember everything. Just the things that help.</p></div>{feedback && <div className="flex items-center gap-1.5 rounded-full bg-[#e1eee2] px-3 py-1.5 text-[12px] font-semibold text-[#4c7b66] animate-pop"><Check size={14} />{feedback}</div>}</div>
       <div className="mb-5 flex rounded-xl bg-[#f1ede4] p-1 sm:w-fit">
