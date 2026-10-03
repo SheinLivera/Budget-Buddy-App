@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ChangeEvent, type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -9,6 +9,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   CreditCard,
+  Download,
   HeartPulse,
   Home,
   Leaf,
@@ -17,10 +18,12 @@ import {
   PencilLine,
   Plus,
   Receipt,
+  ShieldCheck,
   Sparkles,
   Trash2,
   TrendingUp,
   Utensils,
+  Upload,
   Wallet,
   Waves,
   X,
@@ -39,6 +42,7 @@ type Transaction = { id: string; type: TransactionType; description: string; cat
 type SavingsGoal = { id: string; name: string; target: number };
 type RecurringTemplate = { id: string; description: string; type: TransactionType; amount: number; day: number; category: string };
 type BudgetData = { budgets: Budget[]; activeMonth: string; transactions: Transaction[]; hasStarted: boolean; goals: SavingsGoal[]; recurringTemplates: RecurringTemplate[]; spendingAlerts: boolean };
+type BudgetBackup = { app: 'budget-buddy'; version: 1; exportedAt: string; data: BudgetData };
 
 const queryClient = new QueryClient();
 const STORAGE_KEY = 'budget-buddy-data-v1';
@@ -81,11 +85,129 @@ const seedTransactions: Transaction[] = [];
 
 const upsertBudget = (budgets: Budget[], budget: Budget) =>
   [...budgets.filter((item) => item.month !== budget.month), budget].sort((a, b) => a.month.localeCompare(b.month));
+const mergeById = <T extends { id: string }>(current: T[], incoming: T[]) => {
+  const merged = new Map(current.map((item) => [item.id, item]));
+  incoming.forEach((item) => merged.set(item.id, item));
+  return [...merged.values()];
+};
 const budgetForMonth = (budgets: Budget[], month: string) =>
   budgets.find((item) => item.month === month) ??
   [...budgets].filter((item) => item.month < month).sort((a, b) => b.month.localeCompare(a.month))[0] ??
   [...budgets].sort((a, b) => a.month.localeCompare(b.month))[0] ??
   seedBudget;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const isMonthKey = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+const isDateKey = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+};
+const isPositiveNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+const isNonNegativeNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const hasUniqueIds = <T extends { id: string }>(items: T[]) =>
+  new Set(items.map((item) => item.id)).size === items.length;
+const isTransactionType = (value: unknown): value is TransactionType =>
+  value === 'income' || value === 'expense';
+const isBudgetCategory = (value: unknown): value is BudgetCategory =>
+  isRecord(value) &&
+  typeof value.id === 'string' &&
+  typeof value.name === 'string' &&
+  typeof value.icon === 'string' &&
+  typeof value.color === 'string' &&
+  isNonNegativeNumber(value.planned);
+const isBudget = (value: unknown): value is Budget =>
+  isRecord(value) &&
+  isMonthKey(value.month) &&
+  isNonNegativeNumber(value.income) &&
+  Array.isArray(value.categories) &&
+  value.categories.length > 0 &&
+  value.categories.every(isBudgetCategory) &&
+  hasUniqueIds(value.categories);
+const isTransaction = (value: unknown): value is Transaction =>
+  isRecord(value) &&
+  typeof value.id === 'string' &&
+  isTransactionType(value.type) &&
+  typeof value.description === 'string' &&
+  typeof value.category === 'string' &&
+  isPositiveNumber(value.amount) &&
+  isDateKey(value.date) &&
+  (!('goalId' in value) || typeof value.goalId === 'string') &&
+  (!('recurringId' in value) || typeof value.recurringId === 'string');
+const isSavingsGoal = (value: unknown): value is SavingsGoal =>
+  isRecord(value) &&
+  typeof value.id === 'string' &&
+  typeof value.name === 'string' &&
+  isPositiveNumber(value.target);
+const isRecurringTemplate = (value: unknown): value is RecurringTemplate =>
+  isRecord(value) &&
+  typeof value.id === 'string' &&
+  typeof value.description === 'string' &&
+  isTransactionType(value.type) &&
+  isPositiveNumber(value.amount) &&
+  typeof value.day === 'number' &&
+  Number.isInteger(value.day) &&
+  value.day >= 1 &&
+  value.day <= 31 &&
+  typeof value.category === 'string';
+
+function parseBudgetBackup(contents: string): BudgetBackup {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    throw new Error('That file is not valid JSON. Choose a Budget Buddy backup file.');
+  }
+  if (!isRecord(parsed) || parsed.app !== 'budget-buddy') {
+    throw new Error('This file is not a Budget Buddy backup.');
+  }
+  if (parsed.version !== 1) {
+    throw new Error('This backup version is not supported by this copy of Budget Buddy.');
+  }
+  if (typeof parsed.exportedAt !== 'string' || Number.isNaN(Date.parse(parsed.exportedAt)) || !isRecord(parsed.data)) {
+    throw new Error('The backup is missing its export date or data.');
+  }
+  const data = parsed.data;
+  if (
+    !Array.isArray(data.budgets) ||
+    data.budgets.length === 0 ||
+    !data.budgets.every(isBudget) ||
+    !hasUniqueIds(data.budgets.map((budget) => ({ id: budget.month }))) ||
+    !isMonthKey(data.activeMonth) ||
+    !data.budgets.some((budget) => budget.month === data.activeMonth) ||
+    !Array.isArray(data.transactions) ||
+    !data.transactions.every(isTransaction) ||
+    !hasUniqueIds(data.transactions) ||
+    typeof data.hasStarted !== 'boolean' ||
+    !Array.isArray(data.goals) ||
+    !data.goals.every(isSavingsGoal) ||
+    !hasUniqueIds(data.goals) ||
+    !Array.isArray(data.recurringTemplates) ||
+    !data.recurringTemplates.every(isRecurringTemplate) ||
+    !hasUniqueIds(data.recurringTemplates) ||
+    typeof data.spendingAlerts !== 'boolean'
+  ) {
+    throw new Error('The backup data is incomplete or invalid. No data was changed.');
+  }
+  return {
+    app: 'budget-buddy',
+    version: 1,
+    exportedAt: parsed.exportedAt,
+    data: {
+      budgets: data.budgets,
+      activeMonth: data.activeMonth,
+      transactions: data.transactions,
+      hasStarted: data.hasStarted,
+      goals: data.goals,
+      recurringTemplates: data.recurringTemplates,
+      spendingAlerts: data.spendingAlerts,
+    },
+  };
+}
 
 const previousSampleTransactions: Array<{
   id: string;
@@ -199,6 +321,22 @@ function useBudgetData() {
     addRecurringTemplate: (template: RecurringTemplate) => setData((current) => ({ ...current, recurringTemplates: [...current.recurringTemplates, template] })),
     removeRecurringTemplate: (id: string) => setData((current) => ({ ...current, recurringTemplates: current.recurringTemplates.filter((item) => item.id !== id) })),
     setSpendingAlerts: (enabled: boolean) => setData((current) => ({ ...current, spendingAlerts: enabled })),
+    replaceData: (replacement: BudgetData) => setData(replacement),
+    mergeData: (incoming: BudgetData) => setData((current) => {
+      const budgets = incoming.budgets.reduce(upsertBudget, current.budgets);
+      const activeMonth = budgets.some((item) => item.month === current.activeMonth)
+        ? current.activeMonth
+        : incoming.activeMonth;
+      return {
+        ...current,
+        budgets,
+        activeMonth,
+        transactions: mergeById(current.transactions, incoming.transactions),
+        hasStarted: current.hasStarted || incoming.hasStarted,
+        goals: mergeById(current.goals, incoming.goals),
+        recurringTemplates: mergeById(current.recurringTemplates, incoming.recurringTemplates),
+      };
+    }),
   };
 }
 
@@ -1010,7 +1148,173 @@ function TransactionsPage({ data }: { data: DataContext }) {
        <div className="mb-5 flex items-end justify-between"><div><h2 className="font-serif text-[25px] text-[#315247]">Transaction history</h2><p className="mt-1 text-[13px] text-[#809088]">{transactions.length} {transactions.length === 1 ? 'entry' : 'entries'} across all months</p></div><div className="hidden items-center gap-1.5 text-[11px] text-[#96a098] sm:flex"><CreditCard size={14} /> Stored on this device</div></div>
       {sorted.length === 0 ? <EmptyTransactions /> : <div>{sorted.map((transaction) => <TransactionRow key={transaction.id} transaction={transaction} onDelete={() => { if (window.confirm(`Remove ${transaction.description} from your history?`)) removeTransaction(transaction.id); }} />)}</div>}
     </section>
+     <DataBackupPanel data={data} />
   </div>;
+}
+
+function downloadTextFile(filename: string, contents: string, mimeType: string) {
+  const url = URL.createObjectURL(new Blob([contents], { type: mimeType }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function DataBackupPanel({ data }: { data: DataContext }) {
+  const {
+    budgets, activeMonth, transactions, hasStarted, goals, recurringTemplates, spendingAlerts,
+    replaceData, mergeData,
+  } = data;
+  const [restoreMode, setRestoreMode] = useState<'merge' | 'replace'>('merge');
+  const [backupDraft, setBackupDraft] = useState<{ backup: BudgetBackup; fileName: string } | null>(null);
+  const [backupError, setBackupError] = useState('');
+  const [backupFeedback, setBackupFeedback] = useState('');
+
+  const exportJson = () => {
+    const backup: BudgetBackup = {
+      app: 'budget-buddy',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      data: { budgets, activeMonth, transactions, hasStarted, goals, recurringTemplates, spendingAlerts },
+    };
+    downloadTextFile(
+      `budget-buddy-backup-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(backup, null, 2),
+      'application/json;charset=utf-8',
+    );
+    setBackupFeedback('Full backup downloaded.');
+    setBackupError('');
+  };
+
+  const exportCsv = () => {
+    const csvCell = (value: string | number) => {
+      let text = String(value);
+      if (typeof value === 'string' && /^[\t\r ]*[=+\-@]/.test(text)) text = `'${text}`;
+      return `"${text.replaceAll('"', '""')}"`;
+    };
+    const rows = [
+      ['Date', 'Type', 'Description', 'Category', 'Amount (USD)'].map(csvCell).join(','),
+      ...[...transactions]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((item) => [
+          csvCell(item.date),
+          csvCell(item.type),
+          csvCell(item.description),
+          csvCell(item.category),
+          csvCell(item.amount.toFixed(2)),
+        ].join(',')),
+    ];
+    downloadTextFile(
+      `budget-buddy-transactions-${new Date().toISOString().slice(0, 10)}.csv`,
+      `\uFEFF${rows.join('\r\n')}`,
+      'text/csv;charset=utf-8',
+    );
+    setBackupFeedback('Transaction CSV downloaded.');
+    setBackupError('');
+  };
+
+  const chooseBackup = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    setBackupDraft(null);
+    setBackupError('');
+    setBackupFeedback('');
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setBackupError('That file is larger than 10 MB. Choose a smaller Budget Buddy backup.');
+      return;
+    }
+    try {
+      const backup = parseBudgetBackup(await file.text());
+      setBackupDraft({ backup, fileName: file.name });
+      setRestoreMode('merge');
+    } catch (error) {
+      setBackupError(error instanceof Error ? error.message : 'The backup could not be read. No data was changed.');
+    }
+  };
+
+  const restoreBackup = () => {
+    if (!backupDraft) return;
+    if (restoreMode === 'replace') {
+      const confirmed = window.confirm(
+        'Replace all current budgets, transactions, goals, recurring templates, and alert settings with this backup? This cannot be undone from inside Budget Buddy.',
+      );
+      if (!confirmed) return;
+      replaceData(backupDraft.backup.data);
+      setBackupFeedback('Backup restored. Current app data was replaced.');
+    } else {
+      mergeData(backupDraft.backup.data);
+      setBackupFeedback('Backup merged. Existing alert settings were kept.');
+    }
+    setBackupDraft(null);
+    setBackupError('');
+  };
+
+  return (
+    <section className="paper-card mt-5 rounded-[22px] p-5 sm:p-7" aria-labelledby="backup-panel-title" data-testid="section-data-backup">
+      <div className="mb-5 flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#e5efe5] text-[#56806e]"><ShieldCheck size={19} /></div>
+        <div>
+          <h2 id="backup-panel-title" className="font-serif text-[24px] text-[#25423b]">Back up & move your data</h2>
+          <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-[#78877f]">Your data currently stays in this browser. Download a full backup before clearing browser data or moving to another device.</p>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-2xl bg-[#f3eee5] p-4">
+          <h3 className="text-[13px] font-semibold text-[#365148]">Full app backup</h3>
+          <p className="mt-1 min-h-10 text-[12px] leading-relaxed text-[#87958c]">Includes monthly budgets, transactions, savings goals, recurring templates, and alert settings.</p>
+          <button type="button" onClick={exportJson} className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-[#315b4e] px-3.5 py-2 text-[12px] font-bold text-[#f8f4e9] transition hover:-translate-y-0.5" data-testid="button-export-json-backup"><Download size={15} /> Download full backup</button>
+        </div>
+        <div className="rounded-2xl bg-[#f3eee5] p-4">
+          <h3 className="text-[13px] font-semibold text-[#365148]">Transaction spreadsheet</h3>
+          <p className="mt-1 min-h-10 text-[12px] leading-relaxed text-[#87958c]">Exports all income and expenses as a CSV you can open in a spreadsheet. This does not include your budget plans or goals.</p>
+          <button type="button" onClick={exportCsv} className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-[#cfc8b9] bg-[#fbf8f1] px-3.5 py-2 text-[12px] font-bold text-[#315b4e] transition hover:-translate-y-0.5" data-testid="button-export-transactions-csv"><Download size={15} /> Download transaction CSV</button>
+        </div>
+      </div>
+
+      <div className="mt-5 border-t border-[#eee7dc] pt-5">
+        <h3 className="font-serif text-[20px] text-[#315247]">Restore from a full backup</h3>
+        <p className="mt-1 text-[12px] leading-relaxed text-[#87958c]">Choose a Budget Buddy JSON backup. It is checked before anything changes; CSV files can’t be restored here.</p>
+        <label className="mt-4 block max-w-xl text-[11px] font-bold uppercase tracking-[.14em] text-[#778a80]" htmlFor="input-import-json-backup">
+          Choose a JSON backup
+          <input id="input-import-json-backup" data-testid="input-import-json-backup" type="file" accept=".json,application/json" onChange={chooseBackup} className="input-field mt-2 block w-full rounded-xl px-3 py-2.5 text-[13px] font-normal normal-case tracking-normal file:mr-3 file:rounded-lg file:border-0 file:bg-[#e4eee1] file:px-3 file:py-1.5 file:text-[12px] file:font-semibold file:text-[#477666]" />
+        </label>
+
+        {backupDraft && (
+          <div className="mt-4 rounded-2xl border border-[#dce8da] bg-[#f6f8f1] p-4" data-testid="panel-backup-preview">
+            <p className="text-[13px] font-semibold text-[#365148]">{backupDraft.fileName}</p>
+            <p className="mt-1 text-[12px] text-[#78877f]">
+              Exported {new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(backupDraft.backup.exportedAt))}
+              {' · '}{backupDraft.backup.data.budgets.length} months
+              {' · '}{backupDraft.backup.data.transactions.length} transactions
+              {' · '}{backupDraft.backup.data.goals.length} goals
+              {' · '}{backupDraft.backup.data.recurringTemplates.length} recurring templates
+            </p>
+            <fieldset className="mt-4 space-y-2">
+              <legend className="text-[11px] font-bold uppercase tracking-[.13em] text-[#778a80]">How should this backup be restored?</legend>
+              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-white/70 p-3 text-[12px] text-[#365148]">
+                <input id="radio-backup-merge" data-testid="radio-backup-merge" type="radio" name="backup-restore-mode" value="merge" checked={restoreMode === 'merge'} onChange={() => setRestoreMode('merge')} className="mt-0.5 accent-[#477666]" />
+                <span><span className="font-semibold">Merge with current data</span><span className="mt-0.5 block leading-relaxed text-[#87958c]">Add new items and update matching months or IDs from the backup. Keep the current alert setting.</span></span>
+              </label>
+              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-[#f8ece5] p-3 text-[12px] text-[#70483d]">
+                <input id="radio-backup-replace" data-testid="radio-backup-replace" type="radio" name="backup-restore-mode" value="replace" checked={restoreMode === 'replace'} onChange={() => setRestoreMode('replace')} className="mt-0.5 accent-[#a66e59]" />
+                <span><span className="font-semibold">Replace all current data</span><span className="mt-0.5 block leading-relaxed text-[#9b756a]">Replace budgets, transactions, goals, templates, and alert settings with the backup.</span></span>
+              </label>
+            </fieldset>
+            <button type="button" onClick={restoreBackup} className={`mt-4 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl px-4 py-2 text-[12px] font-bold transition ${restoreMode === 'replace' ? 'bg-[#a75f4e] text-white hover:bg-[#934e40]' : 'bg-[#315b4e] text-[#f8f4e9] hover:bg-[#284d42]'}`} data-testid="button-restore-json-backup"><Upload size={15} /> {restoreMode === 'replace' ? 'Replace current data' : 'Merge backup'}</button>
+          </div>
+        )}
+
+        {backupError && <p className="mt-3 rounded-xl bg-[#f8ece5] px-3.5 py-3 text-[12px] font-semibold text-[#9b5144]" role="alert" data-testid="status-backup-error">{backupError}</p>}
+        {backupFeedback && <p className="mt-3 rounded-xl bg-[#e1eee2] px-3.5 py-3 text-[12px] font-semibold text-[#4c7b66]" role="status" data-testid="status-backup-feedback">{backupFeedback}</p>}
+      </div>
+    </section>
+  );
 }
 
 function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: ReactNode }) {
